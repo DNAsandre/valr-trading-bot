@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.env
+.env.example
+.git/
+.gitignore
+test_env.py
+README.md
