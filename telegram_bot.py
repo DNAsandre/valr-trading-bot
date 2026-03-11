@@ -7,12 +7,10 @@ from config import TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USERS, SUPPORTED_PAIRS, 
 logger = logging.getLogger(__name__)
 
 class TelegramNotifier:
-    def __init__(self, execute_trade_callback, exchange=None, strategy=None):
+    def __init__(self, exchange=None, strategy=None):
         self.app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-        self.execute_trade_callback = execute_trade_callback
         self.exchange = exchange
         self.strategy = strategy
-        self.pending_trades = {}
         self.watched_pairs = list(DEFAULT_WATCHED_PAIRS)
         self.goals = {}  # {currency: {"target_multiplier": 2.0, "initial_balance": float}}
 
@@ -26,7 +24,9 @@ class TelegramNotifier:
         self.app.add_handler(CommandHandler("status", self.status_cmd))
         self.app.add_handler(CommandHandler("goal", self.goal_cmd))
         self.app.add_handler(CommandHandler("goals", self.goals_cmd))
-        self.app.add_handler(CallbackQueryHandler(self.button_handler))
+        self.app.add_handler(CommandHandler("portfolio", self.portfolio_cmd))
+        self.app.add_handler(CommandHandler("sell", self.sell_cmd))
+        self.app.add_handler(CommandHandler("restart", self.restart_cmd))
 
     def _is_authorized(self, user_id: int) -> bool:
         return user_id in TELEGRAM_ALLOWED_USERS
@@ -36,8 +36,8 @@ class TelegramNotifier:
         if user_id not in TELEGRAM_ALLOWED_USERS:
             TELEGRAM_ALLOWED_USERS.append(user_id)
         await update.message.reply_text(
-            "🤖 *VALR HITL Crypto Bot — Active*\n\n"
-            "Monitoring data streams and watching for trade opportunities.\n"
+            "🤖 *VALR Autonomous Crypto Bot — Active*\n\n"
+            "Monitoring and executing trades automatically based on advanced strategies.\n"
             "Type /help to see all available commands.",
             parse_mode='Markdown'
         )
@@ -48,12 +48,15 @@ class TelegramNotifier:
         await update.message.reply_text(
             "📋 *Available Commands*\n\n"
             "💰 /balances — Show all VALR holdings\n"
+            "💼 /portfolio — Show total portfolio value in ZAR\n"
+            "⚡ /sell `XRP` — Smart sell at avg buy price or better\n"
             "👀 /watch `XRPZAR` — Add a pair to monitor\n"
             "🚫 /unwatch `XRPZAR` — Stop monitoring a pair\n"
             "📊 /pairs — List currently watched pairs\n"
             "📈 /status — Live indicator readings per pair\n"
             "🎯 /goal `double XRP` — Set an accumulation target\n"
             "🏆 /goals — View active goals & progress\n"
+            "🔄 /restart — Restart the bot\n"
             "❓ /help — This message",
             parse_mode='Markdown'
         )
@@ -84,6 +87,114 @@ class TelegramNotifier:
         except Exception as e:
             logger.error(f"Balances error: {e}")
             await update.message.reply_text(f"❌ Failed to fetch balances: {e}")
+
+    async def portfolio_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update.effective_user.id):
+            return
+        if not self.exchange:
+            await update.message.reply_text("⚠️ Exchange not connected.")
+            return
+
+        await update.message.reply_text("⏳ Calculating portfolio value...")
+
+        try:
+            total_zar = await self.exchange.get_portfolio_value_zar()
+            await update.message.reply_text(
+                f"💼 *Total Portfolio Value*\n\n"
+                f"**R {total_zar:,.2f}**",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Portfolio error: {e}")
+            await update.message.reply_text(f"❌ Failed to calculate portfolio: {e}")
+
+    async def sell_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update.effective_user.id):
+            return
+        if not self.exchange:
+            await update.message.reply_text("⚠️ Exchange not connected.")
+            return
+
+        if not context.args:
+            await update.message.reply_text("Usage: /sell `XRP`", parse_mode='Markdown')
+            return
+
+        currency = context.args[0].upper()
+        if currency == "ZAR":
+            await update.message.reply_text("❌ Cannot sell ZAR for ZAR.")
+            return
+
+        pair = f"{currency}ZAR"
+        
+        await update.message.reply_text(f"⏳ Analyzing {currency} for sale...")
+
+        try:
+            balances = await self.exchange.get_valr_balances()
+            balance = 0.0
+            for bal in balances:
+                if bal.get('currency') == currency:
+                    balance = float(bal.get('available', 0))
+                    break
+            
+            if balance <= 0:
+                await update.message.reply_text(f"❌ You have no {currency} available to sell.")
+                return
+
+            avg_buy_price = await self.exchange.get_average_buy_price(pair, balance)
+            
+            summary = await self.exchange.get_valr_market_summary(pair)
+            if not summary:
+                await update.message.reply_text(f"❌ Failed to get market price for {pair}.")
+                return
+            current_price = float(summary.get('lastTradedPrice', 0))
+
+            if avg_buy_price == 0:
+                sell_price = current_price
+                post_only = False
+                msg = f"⚠️ No buy history found for {currency}. Selling at current market price (R {current_price:.2f})."
+            elif current_price >= avg_buy_price:
+                sell_price = current_price
+                post_only = False
+                msg = f"✅ Current price (R {current_price:.2f}) is higher than your average buy price (R {avg_buy_price:.2f}). Selling at market price!"
+            else:
+                sell_price = avg_buy_price * 1.005 # Sell at Buy Price + 0.5% buffer
+                post_only = True
+                msg = f"📉 Current price (R {current_price:.2f}) is lower than buy price (R {avg_buy_price:.2f}). Placing a target Limit Order at R {sell_price:.2f}."
+
+            amount = round(balance, 8)
+            result = await self.exchange.place_valr_order(
+                pair=pair, side="SELL", amount=amount, price=sell_price, post_only=post_only
+            )
+            
+            await update.message.reply_text(
+                f"{msg}\n\n"
+                f"🚨 *SMART SELL EXECUTED* 🚨\n"
+                f"*Pair*: {pair}\n"
+                f"*Amount*: {amount} {currency}\n"
+                f"*Avg Buy Price*: R {avg_buy_price:.2f}\n"
+                f"*Sell Price*: R {sell_price:.2f}\n"
+                f"*Status*: {'Filled' if not post_only else 'Pending Limit Order'}",
+                parse_mode='Markdown'
+            )
+
+        except Exception as e:
+            logger.error(f"Sell command error: {e}", exc_info=True)
+            if 'Post-only order would execute immediately' in str(e):
+                await update.message.reply_text(f"❌ Sell failed: Limit order crossed the spread. Price changed rapidly.")
+            else:
+                await update.message.reply_text(f"❌ Sell execution failed: {e}")
+
+    async def restart_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update.effective_user.id):
+            return
+        await update.message.reply_text("🔄 Restarting bot... Please wait a few seconds.", parse_mode='Markdown')
+        import os
+        import sys
+        logger.info("Restarting bot via telegram command...")
+        # Give telegram time to send the message before we kill the process
+        import asyncio
+        loop = asyncio.get_running_loop()
+        loop.call_later(1.0, lambda: os.execl(sys.executable, sys.executable, *sys.argv))
 
     async def watch_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update.effective_user.id):
@@ -275,69 +386,55 @@ class TelegramNotifier:
 
         await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
 
-    async def send_signal(self, trade_info: dict):
-        """Send trade signal with inline keyboard."""
-        trade_id = str(hash(trade_info['insight']) % 100000)
-        self.pending_trades[trade_id] = trade_info
-
+    async def notify_execution(self, trade_info: dict, success: bool, amount: float):
+        """Notify user of an autonomous trade execution."""
         display_pair = trade_info.get('display_pair', trade_info.get('pair', 'BTC/ZAR'))
-        message = (
-            f"🚨 *NEW {trade_info['signal']} SIGNAL* 🚨\n\n"
-            f"*Pair*: {display_pair}\n"
-            f"*Current Price*: R {trade_info['price']:.2f}\n"
-            f"*Take-Profit*: R {trade_info['take_profit']:.2f}\n"
-            f"*Stop-Loss*: R {trade_info['stop_loss']:.2f}\n\n"
-            f"🧠 _{trade_info['insight']}_\n\n"
-            f"Do you want to proceed?"
-        )
-
-        keyboard = [[
-            InlineKeyboardButton("✅ Execute Trade", callback_data=f"exec_{trade_id}"),
-            InlineKeyboardButton("❌ Ignore", callback_data=f"ign_{trade_id}")
-        ]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if success:
+            message = (
+                f"🚨 *TRADE EXECUTED* 🚨\n\n"
+                f"*Action*: {trade_info['signal']} {amount:,.8f} {display_pair}\n"
+                f"*Price*: R {trade_info['price']:.2f}\n"
+                f"*Take-Profit*: R {trade_info['take_profit']:.2f}\n"
+                f"*Stop-Loss*: R {trade_info['stop_loss']:.2f}\n\n"
+                f"🧠 _{trade_info['insight']}_"
+            )
+        else:
+            message = (
+                f"⚠️ *TRADE FAILED TO EXECUTE* ⚠️\n\n"
+                f"*Action*: {trade_info['signal']} {display_pair}\n"
+                f"Price: R {trade_info['price']:.2f}\n\n"
+                f"Bot attempted to trade based on:\n"
+                f"_{trade_info['insight']}_\n\n"
+                f"Check bot logs for reasons (e.g., insufficient funds)."
+            )
 
         for user_id in TELEGRAM_ALLOWED_USERS:
             try:
                 await self.app.bot.send_message(
-                    chat_id=user_id, text=message,
-                    reply_markup=reply_markup, parse_mode='Markdown'
+                    chat_id=user_id, text=message, parse_mode='Markdown'
                 )
             except Exception as e:
-                logger.error(f"Failed sending signal to {user_id}: {e}")
-
-    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        query = update.callback_query
-        if not self._is_authorized(update.effective_user.id):
-            await query.answer("Unauthorized.", show_alert=True)
-            return
-
-        await query.answer()
-        data = query.data
-        if "_" not in data:
-            return
-
-        prefix, trade_id = data.split("_", 1)
-
-        if prefix == "exec":
-            trade_info = self.pending_trades.pop(trade_id, None)
-            if trade_info:
-                await query.edit_message_text(text=f"{query.message.text}\n\n⏳ Executing...")
-                success = await self.execute_trade_callback(trade_info)
-                if success:
-                    await query.edit_message_text(text=f"{query.message.text}\n\n✅ Trade Executed!")
-                else:
-                    await query.edit_message_text(text=f"{query.message.text}\n\n⚠️ Execution Failed.")
-            else:
-                await query.edit_message_text(text=f"{query.message.text}\n\n❌ Trade expired.")
-        elif prefix == "ign":
-            self.pending_trades.pop(trade_id, None)
-            await query.edit_message_text(text=f"{query.message.text}\n\n🚫 Ignored.")
+                logger.error(f"Failed sending execution notice to {user_id}: {e}")
 
     async def start_bot(self):
+        import asyncio
+        from telegram.error import Conflict
+        
         await self.app.initialize()
         await self.app.start()
-        await self.app.updater.start_polling()
+        
+        retries = 12
+        for i in range(retries):
+            try:
+                await self.app.updater.start_polling()
+                logger.info("Telegram polling started successfully.")
+                break
+            except Conflict:
+                logger.warning(f"Telegram Conflict (old instance overlap). Retrying in 10s... ({i+1}/{retries})")
+                await asyncio.sleep(10)
+        else:
+            raise Exception("Failed to start Telegram polling due to persistent Conflict.")
 
     async def stop_bot(self):
         await self.app.updater.stop()

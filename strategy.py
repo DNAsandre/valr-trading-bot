@@ -1,5 +1,6 @@
 import logging
 import pandas as pd
+from config import TRAILING_STOP_LOSS_PCT
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,10 @@ class Strategy:
         df['MACD_Signal'] = df['MACD'].ewm(span=self.macd_signal, adjust=False).mean()
         df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
+        df['EMA_9'] = df['close'].ewm(span=9, adjust=False).mean()
+        df['EMA_21'] = df['close'].ewm(span=21, adjust=False).mean()
+        df['EMA_50'] = df['close'].ewm(span=50, adjust=False).mean()
+
         latest = df.iloc[-1]
         if pd.isna(latest['RSI']) or pd.isna(latest['BBL']) or pd.isna(latest['MACD_Hist']):
             return None
@@ -77,6 +82,9 @@ class Strategy:
             "bb_upper": latest['BBU'],
             "bb_lower": latest['BBL'],
             "macd_hist": latest['MACD_Hist'],
+            "ema_9": latest['EMA_9'],
+            "ema_21": latest['EMA_21'],
+            "ema_50": latest['EMA_50']
         }
 
     def analyze(self, pair: str, current_valr_ob: dict, current_luno_ob: dict) -> dict | None:
@@ -98,6 +106,9 @@ class Strategy:
         bb_upper = indicators["bb_upper"]
         current_price = indicators["price"]
         macd_hist = indicators["macd_hist"]
+        ema_9 = indicators["ema_9"]
+        ema_21 = indicators["ema_21"]
+        ema_50 = indicators["ema_50"]
 
         try:
             valr_bids = sum(float(b['quantity']) for b in current_valr_ob.get('Bids', [])[:5])
@@ -112,29 +123,44 @@ class Strategy:
         signal = None
         insight_text = ""
 
-        if rsi_val <= 30 and current_price <= bb_lower and macd_hist > 0 and valr_bids > valr_asks:
-            signal = "BUY"
-            insight_text = (
-                f"Insight: RSI is oversold at {rsi_val:.1f}, and price (R {current_price:.2f}) touched the lower Bollinger Band. "
-                "MACD histogram shows incoming bullish momentum. Buying pressure is increasing on the VALR order book "
-                f"(Top 5 Bids: {valr_bids:.4f} > Asks: {valr_asks:.4f}). Recommend: BUY {display_pair}."
-            )
-        elif rsi_val >= 70 and current_price >= bb_upper and macd_hist < 0 and valr_asks > valr_bids:
-            signal = "SELL"
-            insight_text = (
-                f"Insight: RSI is overbought at {rsi_val:.1f}, and price (R {current_price:.2f}) touched the upper Bollinger Band. "
-                "MACD histogram suggests exhaustion. Selling pressure is dominating the VALR order book "
-                f"(Top 5 Asks: {valr_asks:.4f} > Bids: {valr_bids:.4f}). Recommend: SELL {display_pair}."
-            )
+        is_uptrend = current_price > ema_50
+        bullish_cross = ema_9 > ema_21
+        bearish_cross = ema_9 < ema_21
+
+        buy_pressure = valr_bids > valr_asks
+        sell_pressure = valr_asks > valr_bids
+
+        # BUY Logic (Mean Reversion OR Trend Following)
+        if (rsi_val <= 30 and current_price <= bb_lower and macd_hist > 0) or (is_uptrend and bullish_cross and macd_hist > 0):
+            if buy_pressure:
+                signal = "BUY"
+                insight_text = (
+                    f"RSI={rsi_val:.1f}, Trend={'Up' if is_uptrend else 'Down'}. "
+                    "Technical confirmations align (MACD/EMA/BB). "
+                    f"Bids: {valr_bids:.2f} > Asks: {valr_asks:.2f}. Autonomous BUY triggered."
+                )
+
+        # SELL Logic (Mean Reversion OR Trend Following)
+        elif (rsi_val >= 70 and current_price >= bb_upper and macd_hist < 0) or (not is_uptrend and bearish_cross and macd_hist < 0):
+            if sell_pressure:
+                signal = "SELL"
+                insight_text = (
+                    f"RSI={rsi_val:.1f}, Trend={'Up' if is_uptrend else 'Down'}. "
+                    "Technical exhaustions align (MACD/EMA/BB). "
+                    f"Asks: {valr_asks:.2f} > Bids: {valr_bids:.2f}. Autonomous SELL triggered."
+                )
 
         if signal:
+            tp_pct = TRAILING_STOP_LOSS_PCT * 1.5  # Dynamic Risk/Reward multiplier of 1.5
+            sl_pct = TRAILING_STOP_LOSS_PCT
+
             return {
                 "signal": signal,
                 "pair": pair,
                 "display_pair": display_pair,
                 "price": current_price,
-                "take_profit": current_price * 1.03 if signal == "BUY" else current_price * 0.97,
-                "stop_loss": current_price * 0.98 if signal == "BUY" else current_price * 1.02,
+                "take_profit": current_price * (1 + tp_pct) if signal == "BUY" else current_price * (1 - tp_pct),
+                "stop_loss": current_price * (1 - sl_pct) if signal == "BUY" else current_price * (1 + sl_pct),
                 "insight": insight_text
             }
 

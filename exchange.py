@@ -57,14 +57,86 @@ class ExchangeInterface:
             logger.error(f"Failed to get all market summaries: {e}")
             return []
 
-    async def place_valr_order(self, pair: str, side: str, amount: float, price: float):
-        """Place a post-only limit order on VALR for any pair."""
+    async def get_portfolio_value_zar(self) -> float:
+        """Calculates total portfolio value in ZAR."""
+        try:
+            balances = await self.get_valr_balances()
+            summaries = await self.get_valr_market_summaries()
+
+            # Create a lookup for last traded prices for pairs ending in ZAR
+            price_map = {}
+            for summary in summaries:
+                pair = summary.get('currencyPair')
+                if pair and pair.endswith('ZAR'):
+                    price_map[pair] = float(summary.get('lastTradedPrice', 0))
+
+            total_zar = 0.0
+            for bal in balances:
+                currency = bal.get('currency')
+                total_amt = float(bal.get('total', 0))
+
+                if total_amt <= 0:
+                    continue
+
+                if currency == 'ZAR':
+                    total_zar += total_amt
+                else:
+                    pair = f"{currency}ZAR"
+                    if pair in price_map:
+                        total_zar += total_amt * price_map[pair]
+
+            return total_zar
+        except Exception as e:
+            logger.error(f"Failed to calculate portfolio value: {e}")
+            return 0.0
+
+    async def get_average_buy_price(self, pair: str, current_balance: float = 0.0) -> float:
+        """Calculate weighted average buy price of the current holdings."""
+        try:
+            history = await self._run_valr_sync(self.valr_client.get_trade_history, pair)
+            if not history:
+                return 0.0
+            
+            buys = [t for t in history if t.get('side') == 'buy']
+            
+            if current_balance <= 0.0:
+                buys = buys[:5]
+                total_qty = sum(float(b['quantity']) for b in buys)
+                if total_qty == 0: return 0.0
+                total_val = sum(float(b['price']) * float(b['quantity']) for b in buys)
+                return total_val / total_qty
+                
+            total_cost = 0.0
+            accumulated_qty = 0.0
+            
+            for b in buys:
+                qty = float(b['quantity'])
+                price = float(b['price'])
+                
+                remaining_needed = current_balance - accumulated_qty
+                if remaining_needed <= 0:
+                    break
+                    
+                take_qty = min(qty, remaining_needed)
+                accumulated_qty += take_qty
+                total_cost += take_qty * price
+                
+            if accumulated_qty > 0:
+                return total_cost / accumulated_qty
+            return 0.0
+
+        except Exception as e:
+            logger.error(f"Failed to get avg buy price for {pair}: {e}")
+            return 0.0
+
+    async def place_valr_order(self, pair: str, side: str, amount: float, price: float, post_only: bool = True):
+        """Place a limit order on VALR for any pair."""
         req = {
             "side": side.upper(),
             "quantity": str(amount),
             "price": str(price),
             "pair": pair,
-            "postOnly": True
+            "post_only": post_only
         }
         return await self._run_valr_sync(self.valr_client.post_limit_order, **req)
 

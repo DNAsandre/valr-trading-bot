@@ -13,48 +13,66 @@ class HitlTradingBot:
         self.exchange = ExchangeInterface()
         self.strategy = Strategy()
         self.notifier = TelegramNotifier(
-            self.execute_trade_callback,
             exchange=self.exchange,
             strategy=self.strategy
         )
         self.queue = asyncio.Queue()
 
-    async def execute_trade_callback(self, trade_info: dict) -> bool:
+    async def execute_signal_autonomously(self, trade_info: dict) -> tuple[bool, float]:
         try:
             logger.info(f"Executing trade: {trade_info}")
             pair = trade_info.get('pair', VALR_PAIR)
-
-            balances = await self.exchange.get_valr_balances()
-            zar_balance = 0.0
-            for bal in balances:
-                if bal.get('currency') == 'ZAR':
-                    zar_balance = float(bal.get('available', 0))
-                    break
-
-            position_size_zar = zar_balance * MAX_POSITION_SIZE_PCT
+            signal = trade_info.get('signal', 'BUY').upper()
             price = float(trade_info['price'])
 
-            if position_size_zar <= 0:
-                logger.error("Insufficient ZAR balance.")
-                return False
+            base_currency = pair.replace('ZAR', '').replace('USDT', '').replace('USDC', '')
+            quote_currency = 'ZAR' if 'ZAR' in pair else ('USDC' if 'USDC' in pair else 'USDT')
 
-            amount = position_size_zar / price
+            balances = await self.exchange.get_valr_balances()
+            amount = 0.0
+
+            if signal == 'BUY':
+                quote_balance = 0.0
+                for bal in balances:
+                    if bal.get('currency') == quote_currency:
+                        quote_balance = float(bal.get('available', 0))
+                        break
+
+                position_size_quote = quote_balance * MAX_POSITION_SIZE_PCT
+                if position_size_quote <= 0:
+                    logger.error(f"Insufficient {quote_currency} balance.")
+                    return False, 0.0
+
+                amount = position_size_quote / price
+
+            elif signal == 'SELL':
+                base_balance = 0.0
+                for bal in balances:
+                    if bal.get('currency') == base_currency:
+                        base_balance = float(bal.get('available', 0))
+                        break
+
+                amount = base_balance * MAX_POSITION_SIZE_PCT
+                if amount <= 0:
+                    logger.error(f"Insufficient {base_currency} balance.")
+                    return False, 0.0
+
             amount = round(amount, 8)
 
-            logger.info(f"Placing {trade_info['signal']} order: {amount} on {pair} at R{price}")
+            logger.info(f"Placing {signal} order: {amount} on {pair} at R{price}")
 
             result = await self.exchange.place_valr_order(
                 pair=pair,
-                side=trade_info['signal'],
+                side=signal,
                 amount=amount,
                 price=price
             )
             logger.info(f"Order result: {result}")
-            return True
+            return True, amount
 
         except Exception as e:
             logger.error(f"Trade execution error: {e}", exc_info=True)
-            return False
+            return False, 0.0
 
     async def strategy_consumer(self):
         """Consumes WS price data and runs analysis for the originating pair."""
@@ -76,8 +94,13 @@ class HitlTradingBot:
 
                 signal = self.strategy.analyze(pair, valr_ob, luno_ob)
                 if signal:
-                    logger.info(f"Signal for {pair}: {signal['insight']}")
-                    await self.notifier.send_signal(signal)
+                    logger.info(f"Autonomous Signal for {pair}: {signal['insight']}")
+                    
+                    # Execute without HITL
+                    success, amount = await self.execute_signal_autonomously(signal)
+                    
+                    # Notify Telegram
+                    await self.notifier.notify_execution(signal, success, amount)
 
             except Exception as e:
                 logger.warning(f"Consumer error: {e}. Recovering in 5s...")
@@ -100,8 +123,13 @@ class HitlTradingBot:
                                 valr_ob = await self.exchange.get_valr_order_book(pair)
                                 signal = self.strategy.analyze(pair, valr_ob, {})
                                 if signal:
-                                    logger.info(f"REST Signal for {pair}: {signal['insight']}")
-                                    await self.notifier.send_signal(signal)
+                                    logger.info(f"REST Autonomous Signal for {pair}: {signal['insight']}")
+                                    
+                                    # Execute without HITL
+                                    success, amount = await self.execute_signal_autonomously(signal)
+                                    
+                                    # Notify Telegram
+                                    await self.notifier.notify_execution(signal, success, amount)
                     except Exception as e:
                         logger.warning(f"REST poll error for {pair}: {e}")
 
