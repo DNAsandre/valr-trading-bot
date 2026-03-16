@@ -12,6 +12,9 @@ VALR_API_SECRET = os.getenv("VALR_API_SECRET", "")
 LUNO_API_KEY = os.getenv("LUNO_API_KEY", "")
 LUNO_API_SECRET = os.getenv("LUNO_API_SECRET", "")
 
+# AI Config
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
 # Telegram Config
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 _allowed_users_env = os.getenv("TELEGRAM_ALLOWED_USERS", "")
@@ -41,3 +44,8 @@ DEFAULT_WATCHED_PAIRS = ["BTCZAR"]
 
 # REST polling interval for non-WebSocket pairs (seconds)
 POLL_INTERVAL = 30
+
+# Double ZAR Mode — scans the ENTIRE VALR market for the best buy opportunities
+DOUBLE_ZAR_MODE = False  # Master toggle (enable via /doublezar on)
+DOUBLE_ZAR_SCAN_INTERVAL = 1800  # Seconds between scans (30 min)
+DOUBLE_ZAR_BUY_PCT = 0.10  # Percentage of ZAR balance to spend per trade (10%)

@@ -1,6 +1,8 @@
 import logging
+import json
 import pandas as pd
-from config import TRAILING_STOP_LOSS_PCT
+from openai import AsyncOpenAI
+from config import TRAILING_STOP_LOSS_PCT, OPENAI_API_KEY, SUPPORTED_PAIRS
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +17,7 @@ class Strategy:
 
         # Multi-pair: keyed by pair name
         self.price_histories = {}
+        self.ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
     def add_price(self, pair: str, price: float):
         """Add a price to the rolling window for a specific pair."""
@@ -42,11 +45,11 @@ class Strategy:
             "pair": pair,
             "data_points": len(history),
             "ready": True,
-            "price": indicators["price"],
-            "rsi": indicators["rsi"],
-            "bb_upper": indicators["bb_upper"],
-            "bb_lower": indicators["bb_lower"],
-            "macd_hist": indicators["macd_hist"],
+            "price": float(indicators["price"]),
+            "rsi": float(indicators["rsi"]),
+            "bb_upper": float(indicators["bb_upper"]),
+            "bb_lower": float(indicators["bb_lower"]),
+            "macd_hist": float(indicators["macd_hist"]),
         }
 
     def _compute_indicators(self, df: pd.DataFrame) -> dict | None:
@@ -165,3 +168,137 @@ class Strategy:
             }
 
         return None
+
+    async def ai_market_scan(self, current_balances: list) -> str | None:
+        """Scan all supported pairs, gather technical data, and ask AI to pick the best trade."""
+        if not self.ai_client:
+            logger.error("AI Client not initialized. Cannot run market scan.")
+            return None
+
+        # Build market state payload
+        market_state = []
+        for pair in SUPPORTED_PAIRS:
+            status = self.get_status(pair)
+            if status and status.get('ready'):
+                # We only want to provide the AI with pairs that have actionable data
+                market_state.append({
+                    "pair": status['pair'],
+                    "price": status['price'],
+                    "rsi": status['rsi'],
+                    "macd_hist": status['macd_hist'],
+                    "bb_lower": status['bb_lower'],
+                    "bb_upper": status['bb_upper']
+                })
+
+        if not market_state:
+            logger.warning("Not enough market data gathered yet to perform an AI scan.")
+            return None
+
+        prompt = (
+            "You are an expert quantitative crypto hedge fund manager. "
+            "Your ONLY goal is to maximize profit in ZAR (South African Rands).\n"
+            "Here is the current technical state of the top trading pairs:\n"
+            f"{json.dumps(market_state, indent=2)}\n\n"
+            "Analyze the RSI (look for oversold < 30), MACD momentum, and Bollinger Bands.\n"
+            "Based ONLY on this data, which SINGLE pair is the absolute best BUY right now?\n"
+            "Reply strictly with the exact pair ticker (e.g., BTCZAR, XRPZAR) and nothing else. "
+            "If no pairs present a good buying opportunity, reply exactly with 'NONE'."
+        )
+
+        try:
+            logger.info("Executing AI Market Scan via OpenAI...")
+            response = await self.ai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=10,
+                temperature=0.1
+            )
+
+            choice = response.choices[0].message.content.strip().upper()
+            logger.info(f"AI Market Scan Complete. Top Pick: {choice}")
+            
+            if choice == "NONE" or choice not in SUPPORTED_PAIRS:
+                return None
+                
+            return choice
+
+        except Exception as e:
+            logger.error(f"Failed to run AI market scan: {e}")
+            return None
+
+    async def ai_double_zar_scan(self, market_summaries: list, zar_balance: float) -> dict | None:
+        """Scan the ENTIRE VALR market (all ZAR pairs) using AI to find the best buy.
+        
+        Unlike ai_market_scan which only checks SUPPORTED_PAIRS with technical data,
+        this method analyses ALL available pairs using market data (price, % change, volume).
+        
+        Returns: {"pair": "XRPZAR", "reason": "...", "confidence": "HIGH/MED/LOW"} or None
+        """
+        if not self.ai_client:
+            logger.error("AI Client not initialized. Cannot run Double ZAR scan.")
+            return None
+
+        if not market_summaries:
+            logger.warning("No market summaries available for Double ZAR scan.")
+            return None
+
+        # Split into gainers and losers
+        gainers = [s for s in market_summaries if s['changePct'] > 0][:10]
+        losers = [s for s in reversed(market_summaries) if s['changePct'] < 0][:10]
+
+        prompt = (
+            "You are an expert quantitative crypto hedge fund manager trading on the South African VALR exchange.\n"
+            "Your MISSION: Find the SINGLE best cryptocurrency to buy RIGHT NOW to maximize ZAR profit.\n\n"
+            f"💰 Available ZAR to deploy: R {zar_balance:,.2f}\n\n"
+            "📈 TOP GAINERS (highest % change in last 24h):\n"
+            f"{json.dumps(gainers, indent=2)}\n\n"
+            "📉 TOP LOSERS (biggest drops — potential bounce plays):\n"
+            f"{json.dumps(losers, indent=2)}\n\n"
+            "ANALYSIS RULES:\n"
+            "1. Consider MOMENTUM: Gainers with strong volume may continue upward.\n"
+            "2. Consider MEAN REVERSION: Oversold losers with high volume may bounce.\n"
+            "3. AVOID low-volume pairs (volume < 100 in base currency) — they are illiquid.\n"
+            "4. AVOID pairs that have barely moved (< 0.5% change).\n"
+            "5. Factor in risk: prefer a strong setup over a risky moonshot.\n\n"
+            "Reply in EXACTLY this JSON format and nothing else:\n"
+            '{"pair": "XXXZAR", "reason": "one-line explanation", "confidence": "HIGH"}\n'
+            "If NO pair offers a good opportunity, reply exactly: {\"pair\": \"NONE\", \"reason\": \"no good setups\", \"confidence\": \"NONE\"}"
+        )
+
+        try:
+            logger.info("Executing AI Double ZAR Scan...")
+            response = await self.ai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=150,
+                temperature=0.2
+            )
+
+            raw = response.choices[0].message.content.strip()
+            logger.info(f"AI Double ZAR raw response: {raw}")
+
+            result = json.loads(raw)
+            pair = result.get("pair", "NONE").upper()
+            reason = result.get("reason", "No reason given.")
+            confidence = result.get("confidence", "LOW").upper()
+
+            if pair == "NONE":
+                logger.info("AI Double ZAR Scan: No good setups found.")
+                return None
+
+            return {
+                "pair": pair,
+                "reason": reason,
+                "confidence": confidence
+            }
+
+        except json.JSONDecodeError as e:
+            logger.error(f"AI Double ZAR Scan returned non-JSON: {raw} — {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to run AI Double ZAR scan: {e}")
+            return None

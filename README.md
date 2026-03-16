@@ -8,6 +8,17 @@ A Python 3.10+ async-first semi-autonomous cryptocurrency trading bot tailored f
 - **Communications**: `python-telegram-bot` interfaces directly with Telegram API for secure, actionable callback keyboards allowing for safe 1-tap trade executions.
 - **Strategy & Insights**: Utilizes `pandas_ta` to assess MACD momentum, Bollinger Band volatility, and RSI positioning to output comprehensive, natural-language Insight payloads before executing any targets.
 
+## 🚀 Deployment Doctrine
+**CRITICAL**: This project is hosted live on **Railway**. 
+
+1. **Live Environment**: The Telegram bot is controlled by the Railway deployment, NOT by local execution.
+2. **Standard Operating Procedure**: After making any local changes (commands, strategy, logic), you **MUST** deploy them live by running:
+   ```bash
+   railway up
+   ```
+   Always verify the live bot's behavior after deployment.
+
+
 ## Security & Risk Constraints 🔐
 1. **API Keys Scoping**: When making keys on VALR, grant **ONLY "Trade" and "View" permissions**. **NEVER provide "Withdraw" access.**
 2. **Rate Limits Checked**: Internal classes strictly accommodate HTTP 429 Status Limits with exponentially enforced timeout bounds logic, limiting account bans.
