@@ -1,6 +1,6 @@
 import logging
 import json
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters, ContextTypes
 from openai import AsyncOpenAI
 from config import (TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USERS, SUPPORTED_PAIRS, DEFAULT_WATCHED_PAIRS,
@@ -35,8 +35,8 @@ class TelegramNotifier:
         self.app.add_handler(CommandHandler("sell", self.sell_cmd))
         self.app.add_handler(CommandHandler("risk", self.risk_cmd))
         self.app.add_handler(CommandHandler("scan", self.scan_cmd))
-        self.app.add_handler(CommandHandler("restart", self.restart_cmd))
         self.app.add_handler(CommandHandler("doublezar", self.doublezar_cmd))
+        self.app.add_handler(CommandHandler("stopall", self.stopall_cmd))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_ai_chat))
 
     def _is_authorized(self, user_id: int) -> bool:
@@ -71,7 +71,8 @@ class TelegramNotifier:
             "🚫 /unwatch `XRPZAR` — Stop monitoring a pair\n"
             "📊 /pairs — View currently watched pairs\n"
             "📈 /status — See live RSI/MACD readings per pair\n"
-            "⚡ /sell `XRP` — Smart sell (waits for profit or break-even)\n\n"
+            "⚡ /sell `XRP` — Smart sell (waits for profit or break-even)\n"
+            "🛑 /stopall — Emergency stop! Disables scanning and sells ALL assets to ZAR\n\n"
             "*Accumulation Goals*\n"
             "🎯 /goal `double XRP` — Set an accumulation target\n"
             "🏆 /goals — View active goals & progress\n\n"
@@ -387,6 +388,70 @@ class TelegramNotifier:
                 "• `/doublezar scan`",
                 parse_mode='Markdown'
             )
+
+    async def stopall_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update.effective_user.id):
+            return
+            
+        await update.message.reply_text("🚨 *EMERGENCY STOP INITIATED* 🚨\n\nHalting all scanning and preparing to sell all non-ZAR assets...", parse_mode='Markdown')
+        
+        # 1. Disable Double ZAR
+        self.double_zar_enabled = False
+        
+        # 2. Clear Watchlist
+        self.watched_pairs.clear()
+        
+        # 3. Sell all active holdings
+        if not self.exchange:
+            await update.message.reply_text("⚠️ Exchange not connected. Scanning stopped, but could not sell assets.")
+            return
+
+        try:
+            balances = await self.exchange.get_valr_balances()
+            sell_tasks = []
+            assets_to_sell = []
+            
+            for bal in balances:
+                currency = bal.get('currency', '')
+                if currency == 'ZAR':
+                    continue
+                    
+                available = float(bal.get('available', 0))
+                if available > 0:
+                    assets_to_sell.append((currency, available))
+            
+            if not assets_to_sell:
+                await update.message.reply_text("✅ Stop All complete. Watchlist and automatic scanning disabled. No assets needed to be sold (all balances are empty or in ZAR).")
+                return
+                
+            await update.message.reply_text(f"⏳ Selling {len(assets_to_sell)} active holding(s)...")
+
+            for currency, balance in assets_to_sell:
+                pair = f"{currency}ZAR"
+                summary = await self.exchange.get_valr_market_summary(pair)
+                if not summary:
+                    sell_tasks.append(f"❌ Failed to get market price for {currency}. Skipping.")
+                    continue
+                    
+                current_price = float(summary.get('lastTradedPrice', 0))
+                
+                sell_price = current_price * 0.98  # 2% slippage tolerance for quick market execution
+                amount = round(balance, 8)
+                
+                try:
+                    await self.exchange.place_valr_order(
+                        pair=pair, side="SELL", amount=amount, price=sell_price, post_only=False
+                    )
+                    sell_tasks.append(f"✅ Executed sell for {currency}: {amount} at approx R {current_price:.2f}")
+                except Exception as e:
+                    sell_tasks.append(f"❌ Failed sell for {currency}: {e}")
+                    
+            report = "\n".join(sell_tasks)
+            await update.message.reply_text(f"🛑 *STOP ALL SEQUENCES COMPLETED*\n\n{report}", parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Stopall error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Emergency stop encountered an error while trying to sell: {e}")
 
     async def restart_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update.effective_user.id):
@@ -746,6 +811,18 @@ class TelegramNotifier:
                         "required": []
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "stopall",
+                    "description": "Emergency kill switch. Stops all bot scanning, clears the watchlist, and sells all non-ZAR assets immediately.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }
+                }
             }
         ]
 
@@ -787,6 +864,9 @@ class TelegramNotifier:
                     elif func_name == "force_scan":
                         await update.message.reply_text(f"🤖 Triggering a full market scan...")
                         await self.scan_cmd(update, context)
+                    elif func_name == "stopall":
+                        await update.message.reply_text(f"🤖 Requesting EMERGENCY STOPALL sequence...")
+                        await self.stopall_cmd(update, context)
                 
                 if msg.content:
                     await update.message.reply_text(msg.content, parse_mode='Markdown')
@@ -803,6 +883,30 @@ class TelegramNotifier:
         
         await self.app.initialize()
         await self.app.start()
+        
+        # Register commands for the Telegram autocomplete menu
+        commands = [
+            BotCommand("balances", "View all current VALR holdings"),
+            BotCommand("portfolio", "Total portfolio value in ZAR"),
+            BotCommand("profit", "Detailed Profit/Loss analysis"),
+            BotCommand("risk", "Set trade size % per position"),
+            BotCommand("scan", "Wake up AI brain to find the best current trade"),
+            BotCommand("restart", "Completely restart the bot processes"),
+            BotCommand("watch", "Manually add a pair to monitor"),
+            BotCommand("unwatch", "Stop monitoring a pair"),
+            BotCommand("pairs", "View currently watched pairs"),
+            BotCommand("status", "See live RSI/MACD readings per pair"),
+            BotCommand("sell", "Smart sell (waits for profit or break-even)"),
+            BotCommand("stopall", "Emergency stop! Disables scanning and sells ALL assets to ZAR"),
+            BotCommand("goal", "Set an accumulation target"),
+            BotCommand("goals", "View active goals & progress"),
+            BotCommand("doublezar", "Toggle Double ZAR mode"),
+        ]
+        try:
+            await self.app.bot.set_my_commands(commands)
+            logger.info("Successfully registered Telegram bot commands.")
+        except Exception as e:
+            logger.error(f"Failed to register bot commands: {e}")
         
         retries = 12
         for i in range(retries):
