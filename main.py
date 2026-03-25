@@ -199,7 +199,9 @@ class HitlTradingBot:
                 if not summary:
                     logger.warning(f"Double ZAR: Could not get price for {pair}.")
                     continue
-                current_price = float(summary.get('lastTradedPrice', 0))
+                # Use bidPrice to ensure Maker status on BUY limits
+                bid_price_str = summary.get('bidPrice')
+                current_price = float(bid_price_str) if bid_price_str else float(summary.get('lastTradedPrice', 0))
                 if current_price <= 0:
                     continue
 
@@ -214,7 +216,7 @@ class HitlTradingBot:
                 logger.info(f"Double ZAR: Buying {buy_amount} of {pair} at R{current_price:.2f} (reason: {reason})")
                 try:
                     await self.exchange.place_valr_order(
-                        pair=pair, side="BUY", amount=buy_amount, price=current_price, post_only=False
+                        pair=pair, side="BUY", amount=buy_amount, price=current_price, post_only=True
                     )
                     trade_success = True
                 except Exception as e:

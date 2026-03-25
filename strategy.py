@@ -113,9 +113,16 @@ class Strategy:
         ema_21 = indicators["ema_21"]
         ema_50 = indicators["ema_50"]
 
+        best_bid_price = current_price
+        best_ask_price = current_price
         try:
             valr_bids = sum(float(b['quantity']) for b in current_valr_ob.get('Bids', [])[:5])
             valr_asks = sum(float(a['quantity']) for a in current_valr_ob.get('Asks', [])[:5])
+            
+            if current_valr_ob.get('Bids'):
+                best_bid_price = float(current_valr_ob.get('Bids')[0].get('price', current_price))
+            if current_valr_ob.get('Asks'):
+                best_ask_price = float(current_valr_ob.get('Asks')[0].get('price', current_price))
         except Exception as e:
             logger.error(f"Orderbook parsing error for {pair}: {e}")
             valr_bids, valr_asks = 0, 0
@@ -156,14 +163,16 @@ class Strategy:
         if signal:
             tp_pct = TRAILING_STOP_LOSS_PCT * 1.5  # Dynamic Risk/Reward multiplier of 1.5
             sl_pct = TRAILING_STOP_LOSS_PCT
+            
+            limit_price = best_bid_price if signal == "BUY" else best_ask_price
 
             return {
                 "signal": signal,
                 "pair": pair,
                 "display_pair": display_pair,
-                "price": current_price,
-                "take_profit": current_price * (1 + tp_pct) if signal == "BUY" else current_price * (1 - tp_pct),
-                "stop_loss": current_price * (1 - sl_pct) if signal == "BUY" else current_price * (1 + sl_pct),
+                "price": limit_price,
+                "take_profit": limit_price * (1 + tp_pct) if signal == "BUY" else limit_price * (1 - tp_pct),
+                "stop_loss": limit_price * (1 - sl_pct) if signal == "BUY" else limit_price * (1 + sl_pct),
                 "insight": insight_text
             }
 

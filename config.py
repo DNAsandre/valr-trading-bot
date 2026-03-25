@@ -23,13 +23,13 @@ TELEGRAM_ALLOWED_USERS = [
 ]
 
 # Risk Management
-MAX_POSITION_SIZE_PCT = 0.05
+MAX_POSITION_SIZE_PCT = 0.20
 AUTONOMOUS_MODE = True
-TRAILING_STOP_LOSS_PCT = 0.02
+TRAILING_STOP_LOSS_PCT = 0.01
 MAX_OPEN_TRADES = 3
 
 # Trading Pairs
-VALR_PAIR = "BTCZAR"
+VALR_PAIR = "XRPZAR"
 LUNO_PAIR = "XBTZAR"
 
 # Supported pairs on VALR for multi-pair monitoring
@@ -40,7 +40,7 @@ SUPPORTED_PAIRS = [
 ]
 
 # Default pairs to watch on startup
-DEFAULT_WATCHED_PAIRS = ["BTCZAR"]
+DEFAULT_WATCHED_PAIRS = ["XRPZAR"]
 
 # REST polling interval for non-WebSocket pairs (seconds)
 POLL_INTERVAL = 30
