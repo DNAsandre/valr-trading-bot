@@ -36,6 +36,7 @@ class TelegramNotifier:
         self.app.add_handler(CommandHandler("risk", self.risk_cmd))
         self.app.add_handler(CommandHandler("scan", self.scan_cmd))
         self.app.add_handler(CommandHandler("doublezar", self.doublezar_cmd))
+        self.app.add_handler(CommandHandler("sellall", self.sellall_cmd))
         self.app.add_handler(CommandHandler("stopall", self.stopall_cmd))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_ai_chat))
 
@@ -72,6 +73,7 @@ class TelegramNotifier:
             "📊 /pairs — View currently watched pairs\n"
             "📈 /status — See live RSI/MACD readings per pair\n"
             "⚡ /sell `XRP` — Smart sell (waits for profit or break-even)\n"
+            "🧹 /sellall — Smart sell ALL non-ZAR assets for break-even or profit\n"
             "🛑 /stopall — Emergency stop! Disables scanning and sells ALL assets to ZAR\n\n"
             "*Accumulation Goals*\n"
             "🎯 /goal `double XRP` — Set an accumulation target\n"
@@ -245,6 +247,78 @@ class TelegramNotifier:
                 await update.message.reply_text(f"❌ Sell failed: Limit order crossed the spread. Price changed rapidly.")
             else:
                 await update.message.reply_text(f"❌ Sell execution failed: {e}")
+
+    async def sellall_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update.effective_user.id):
+            return
+        if not self.exchange:
+            await update.message.reply_text("⚠️ Exchange not connected.")
+            return
+
+        await update.message.reply_text("⏳ *SMART SELL-ALL INITIATED*\n\nScanning portfolio to liquidate all assets safely...", parse_mode='Markdown')
+
+        try:
+            balances = await self.exchange.get_valr_balances()
+            sell_tasks = []
+            assets_to_sell = []
+            
+            for bal in balances:
+                currency = bal.get('currency', '')
+                if currency == 'ZAR':
+                    continue
+                    
+                available = float(bal.get('available', 0))
+                if available > 0:
+                    assets_to_sell.append((currency, available))
+            
+            if not assets_to_sell:
+                await update.message.reply_text("✅ Smart Sell-All complete. No non-ZAR assets available to sell.")
+                return
+                
+            for currency, balance in assets_to_sell:
+                pair = f"{currency}ZAR"
+                
+                avg_buy_price = await self.exchange.get_average_buy_price(pair, balance)
+                summary = await self.exchange.get_valr_market_summary(pair)
+                
+                if not summary:
+                    sell_tasks.append(f"❌ *{currency}*: Failed to get market price. Skipping.")
+                    continue
+                    
+                current_price = float(summary.get('lastTradedPrice', 0))
+
+                if avg_buy_price == 0:
+                    sell_price = current_price
+                    post_only = False
+                    status_msg = "Market (No history)"
+                elif current_price >= avg_buy_price:
+                    sell_price = current_price
+                    post_only = False
+                    status_msg = "Market (In Profit)"
+                else:
+                    sell_price = avg_buy_price * 1.005 # Break-even + 0.5%
+                    post_only = True
+                    status_msg = f"Limit (Target Break-even + 0.5%)"
+
+                amount = round(balance, 8)
+                
+                try:
+                    await self.exchange.place_valr_order(
+                        pair=pair, side="SELL", amount=amount, price=sell_price, post_only=post_only
+                    )
+                    sell_tasks.append(f"✅ *{currency}*: {amount} at R {sell_price:.2f} — _{status_msg}_")
+                except Exception as e:
+                    if 'Post-only order would execute immediately' in str(e):
+                        sell_tasks.append(f"❌ *{currency}*: Failed (Crossed spread, price moving rapidly)")
+                    else:
+                        sell_tasks.append(f"❌ *{currency}*: Failed ({str(e)})")
+                    
+            report = "\n".join(sell_tasks)
+            await update.message.reply_text(f"🧹 *SELL-ALL SEQUENCE COMPLETED*\n\n{report}", parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Sellall error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Smart sell-all encountered an error: {e}")
 
     async def scan_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update.effective_user.id):
