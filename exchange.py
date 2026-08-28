@@ -5,7 +5,7 @@ from typing import Optional, Dict
 from valr_python import Client, WebSocketClient
 import aiohttp
 
-from config import VALR_API_KEY, VALR_API_SECRET, LUNO_PAIR
+from config import VALR_API_KEY, VALR_API_SECRET, LUNO_PAIR, VALR_PAIR
 
 logger = logging.getLogger(__name__)
 
@@ -253,7 +253,11 @@ class ExchangeInterface:
             return None
 
     async def place_valr_order(self, pair: str, side: str, amount: float, price: float, post_only: bool = True):
-        """Place a limit order on VALR for any pair."""
+        """Place a limit order on VALR, locked to the configured trading pair."""
+        if pair.upper() != VALR_PAIR:
+            raise ValueError(
+                f"Trading is locked to {VALR_PAIR}; refusing order for {pair.upper()}."
+            )
         req = {
             "side": side.upper(),
             "quantity": str(amount),

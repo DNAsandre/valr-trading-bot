@@ -29,18 +29,15 @@ TRAILING_STOP_LOSS_PCT = 0.01
 MAX_OPEN_TRADES = 3
 
 # Trading Pairs
+# This bot is intentionally locked to XRP/ZAR.  Keep execution and the
+# Telegram watchlist constrained to this pair unless the user explicitly
+# changes the strategy scope.
 VALR_PAIR = "XRPZAR"
+SUPPORTED_PAIRS = [VALR_PAIR]
 LUNO_PAIR = "XBTZAR"
 
-# Supported pairs on VALR for multi-pair monitoring
-SUPPORTED_PAIRS = [
-    "BTCZAR", "ETHZAR", "XRPZAR", "SOLZAR", "ADAZAR",
-    "DOTZAR", "LINKZAR", "AVAXZAR", "MATICCZAR", "DOGEZAR",
-    "USDCZAR", "USDTZAR",
-]
-
 # Default pairs to watch on startup
-DEFAULT_WATCHED_PAIRS = ["XRPZAR"]
+DEFAULT_WATCHED_PAIRS = [VALR_PAIR]
 
 # REST polling interval for non-WebSocket pairs (seconds)
 POLL_INTERVAL = 30
