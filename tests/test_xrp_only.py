@@ -29,6 +29,28 @@ class XrpZarOnlyTests(unittest.TestCase):
 
         asyncio.run(place_blocked_order())
 
+    def test_websocket_subscribes_to_xrp_zar_trades_only(self):
+        class FakeWebSocketClient:
+            init_kwargs: dict[str, Any] = {}
+
+            def __init__(self, **kwargs):
+                type(self).init_kwargs = kwargs
+
+            async def run(self):
+                return None
+
+        exchange = ExchangeInterface()
+
+        async def start_websocket_without_network():
+            with patch("exchange.WebSocketClient", FakeWebSocketClient):
+                await exchange.start_ws(asyncio.Queue())
+
+        asyncio.run(start_websocket_without_network())
+        self.assertEqual(FakeWebSocketClient.init_kwargs["currency_pairs"], ["XRPZAR"])
+        self.assertEqual(
+            FakeWebSocketClient.init_kwargs["trade_subscriptions"], ["NEW_TRADE"]
+        )
+
     def test_unauthorized_start_cannot_add_user_to_trade_allowlist(self):
         unauthorized_user_id = 999_999_999
         update = SimpleNamespace(

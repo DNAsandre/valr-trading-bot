@@ -304,7 +304,13 @@ class ExchangeInterface:
             "AGGREGATED_ORDERBOOK_UPDATE": lambda data: None,
             "MARKET_SUMMARY_UPDATE": lambda data: None,
         }
-        self.ws_client = WebSocketClient(api_key=VALR_API_KEY, api_secret=VALR_API_SECRET, hooks=hooks)
+        self.ws_client = WebSocketClient(
+            api_key=VALR_API_KEY,
+            api_secret=VALR_API_SECRET,
+            hooks=hooks,
+            currency_pairs=[VALR_PAIR],
+            trade_subscriptions=["NEW_TRADE"],
+        )
 
         retries = 5
         backoff = 2
