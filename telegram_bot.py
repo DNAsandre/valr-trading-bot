@@ -45,8 +45,9 @@ class TelegramNotifier:
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
-        if user_id not in TELEGRAM_ALLOWED_USERS:
-            TELEGRAM_ALLOWED_USERS.append(user_id)
+        if not self._is_authorized(user_id):
+            logger.warning("Ignored /start from unauthorized Telegram user %s", user_id)
+            return
         await update.message.reply_text(
             "🤖 *VALR Autonomous Crypto Bot — Active*\n\n"
             "Monitoring and executing trades automatically based on advanced strategies.\n"

@@ -1,9 +1,12 @@
 import asyncio
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import AsyncMock, patch
 
 from config import DEFAULT_WATCHED_PAIRS, SUPPORTED_PAIRS
 from exchange import ExchangeInterface
+from telegram_bot import TelegramNotifier
 
 
 class XrpZarOnlyTests(unittest.TestCase):
@@ -25,6 +28,23 @@ class XrpZarOnlyTests(unittest.TestCase):
                     )
 
         asyncio.run(place_blocked_order())
+
+    def test_unauthorized_start_cannot_add_user_to_trade_allowlist(self):
+        unauthorized_user_id = 999_999_999
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=unauthorized_user_id),
+            message=SimpleNamespace(reply_text=AsyncMock()),
+        )
+
+        async def start_as_unauthorized_user():
+            allowed_users = [123_456_789]
+            with patch("telegram_bot.TELEGRAM_ALLOWED_USERS", allowed_users):
+                notifier = TelegramNotifier()
+                await notifier.start(cast(Any, update), cast(Any, None))
+                self.assertNotIn(unauthorized_user_id, allowed_users)
+                update.message.reply_text.assert_not_awaited()
+
+        asyncio.run(start_as_unauthorized_user())
 
 
 if __name__ == "__main__":
