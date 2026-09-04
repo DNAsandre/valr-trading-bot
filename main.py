@@ -98,10 +98,13 @@ class HitlTradingBot:
                     quote_balance = self.paper_portfolio.zar_balance
                     base_held = self.paper_portfolio.xrp_balance
 
-                # Do not stack a second XRP position.
-                current_value_held = base_held * price
-                if current_value_held > 100:
-                    logger.info(f"Ignored BUY signal for {pair}: Already hold R{current_value_held:.2f} worth.")
+                # One-position rule: do not stack a second XRP entry.
+                if base_held > 0:
+                    logger.info(
+                        "Ignored BUY signal for %s: XRP position already open (%.8f XRP).",
+                        pair,
+                        base_held,
+                    )
                     return False, 0.0
 
                 position_size_quote = quote_balance * self.notifier.risk_pct

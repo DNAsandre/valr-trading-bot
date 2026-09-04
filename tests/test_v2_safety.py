@@ -13,6 +13,7 @@ from risk import TradingRiskGuard
 from strategy import Strategy
 from paper import PaperPortfolio
 from reporting import format_paper_daily_report
+from backtest import run_backtest
 
 
 class PaperExecutionTests(unittest.TestCase):
@@ -86,6 +87,28 @@ class PaperExecutionTests(unittest.TestCase):
 
         asyncio.run(execute_paper_signal())
 
+    def test_existing_paper_xrp_position_blocks_another_buy(self):
+        bot = HitlTradingBot.__new__(HitlTradingBot)
+        bot.exchange = SimpleNamespace(
+            execution_mode="paper",
+            get_valr_balances=AsyncMock(return_value=[]),
+            place_valr_order=AsyncMock(),
+        )
+        bot.notifier = SimpleNamespace(risk_pct=0.02)
+        bot.risk_guard = TradingRiskGuard(max_daily_loss_zar=50.0, cooldown_seconds=0, max_trades_per_day=3)
+        bot.paper_portfolio = PaperPortfolio(
+            initial_zar=980.0, initial_xrp=0.2, initial_xrp_price=100.0, fee_pct=0.002
+        )
+        signal = {"pair": "XRPZAR", "signal": "BUY", "price": 100.0}
+
+        async def execute_second_buy():
+            success, amount = await bot.execute_signal_autonomously(signal)
+            self.assertFalse(success)
+            self.assertEqual(amount, 0.0)
+            bot.exchange.place_valr_order.assert_not_awaited()
+
+        asyncio.run(execute_second_buy())
+
     def test_ticks_only_create_one_indicator_point_per_closed_candle(self):
         strategy = Strategy(candle_seconds=300)
         strategy.add_price("XRPZAR", 23.00, timestamp=0)
@@ -152,6 +175,26 @@ class PaperExecutionTests(unittest.TestCase):
         report = restored.daily_report(mark_price=21.0)
         self.assertEqual(report["fills"], 1)
         self.assertAlmostEqual(report["equity_zar"], 1_009.6, places=2)
+
+    def test_backtest_applies_fees_to_forced_round_trip(self):
+        candles = [
+            {"startTime": "2026-09-01T00:00:00Z", "close": "100"},
+            {"startTime": "2026-09-01T00:05:00Z", "close": "110"},
+        ]
+        signals = ["BUY", "SELL"]
+        result = run_backtest(
+            candles,
+            signal_provider=lambda index, _: signals[index],
+            starting_zar=1_000.0,
+            position_size_pct=0.02,
+            fee_pct=0.002,
+            cooldown_seconds=0,
+            max_trades_per_day=3,
+        )
+
+        self.assertEqual(result["fills"], 2)
+        self.assertAlmostEqual(result["realized_pnl_zar"], 1.916, places=3)
+        self.assertAlmostEqual(result["ending_equity_zar"], 1_001.916, places=3)
 
 
 if __name__ == "__main__":
