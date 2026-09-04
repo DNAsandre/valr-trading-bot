@@ -8,21 +8,26 @@ A Python 3.10+ async-first semi-autonomous cryptocurrency trading bot tailored f
 - **Communications**: `python-telegram-bot` interfaces directly with Telegram API for secure, actionable callback keyboards allowing for safe 1-tap trade executions.
 - **Strategy & Insights**: Utilizes `pandas_ta` to assess MACD momentum, Bollinger Band volatility, and RSI positioning to output comprehensive, natural-language Insight payloads before executing any targets.
 
-## 🚀 Deployment Doctrine
-**CRITICAL**: This project is hosted live on **Railway**. 
+## Local v2 operation — XRP/ZAR paper trading first
 
-1. **Live Environment**: The Telegram bot is controlled by the Railway deployment, NOT by local execution.
-2. **Standard Operating Procedure**: After making any local changes (commands, strategy, logic), you **MUST** deploy them live by running:
-   ```bash
-   railway up
-   ```
-   Always verify the live bot's behavior after deployment.
+This bot runs locally as a macOS LaunchAgent; Railway is no longer required.
 
+### Safety defaults
 
-## Security & Risk Constraints 🔐
-1. **API Keys Scoping**: When making keys on VALR, grant **ONLY "Trade" and "View" permissions**. **NEVER provide "Withdraw" access.**
-2. **Rate Limits Checked**: Internal classes strictly accommodate HTTP 429 Status Limits with exponentially enforced timeout bounds logic, limiting account bans.
-3. **Hardcapped Positions**: Native `position_size_zar` calculations never mathematically exceed the global `MAX_POSITION_SIZE_PCT` core parameter (Currently defined at 5% allocated portfolio size per signal).
+- **Only `XRPZAR` can be watched, subscribed, or submitted for execution.**
+- **`TRADING_MODE=paper` is the default.** In this mode order attempts are simulated locally; they never reach VALR’s order endpoint.
+- A simulated portfolio is seeded once from a read-only balance snapshot, stored locally without credentials, and reported daily at **18:00 SAST**.
+- The v2 risk limits default to a **2%** buy size, **one position**, **three executions/day**, **15-minute cooldown**, and **R50 realised daily-loss limit**.
+- Signals are evaluated from **closed 5-minute candles**, not every price tick.
+
+### Before any future live consideration
+
+1. Keep VALR keys restricted to **View + Trade only** — never withdrawal permission.
+2. Run and evaluate paper mode for a meaningful sample, including fees and daily reports.
+3. Verify the Telegram numeric allowlist is paired to your current chat.
+4. Make a separate, explicit decision before changing `TRADING_MODE` to `live`.
+
+The bot makes no profitability promise. All live trading remains real-money risk.
 
 ## Pre-requisites & Local Environment 💻
 1. Clone / Change your contextual working Directory `Trader Bot`.

@@ -5,12 +5,15 @@ from typing import Optional, Dict
 from valr_python import Client, WebSocketClient
 import aiohttp
 
-from config import VALR_API_KEY, VALR_API_SECRET, LUNO_PAIR, VALR_PAIR
+from config import VALR_API_KEY, VALR_API_SECRET, LUNO_PAIR, VALR_PAIR, TRADING_MODE
 
 logger = logging.getLogger(__name__)
 
 class ExchangeInterface:
-    def __init__(self):
+    def __init__(self, execution_mode: str | None = None):
+        self.execution_mode = (execution_mode or TRADING_MODE).lower()
+        if self.execution_mode not in {"paper", "live"}:
+            raise ValueError("execution_mode must be either 'paper' or 'live'.")
         self.valr_client = Client(api_key=VALR_API_KEY, api_secret=VALR_API_SECRET)
         self.ws_client = None
         self.luno_base_url = "https://api.luno.com/api/1"
@@ -253,11 +256,24 @@ class ExchangeInterface:
             return None
 
     async def place_valr_order(self, pair: str, side: str, amount: float, price: float, post_only: bool = True):
-        """Place a limit order on VALR, locked to the configured trading pair."""
+        """Place a limit order or record a paper fill, always restricted to XRP/ZAR."""
         if pair.upper() != VALR_PAIR:
             raise ValueError(
                 f"Trading is locked to {VALR_PAIR}; refusing order for {pair.upper()}."
             )
+        if self.execution_mode == "paper":
+            logger.info(
+                "Paper order recorded: %s %s %s at R%s", side.upper(), amount, pair.upper(), price
+            )
+            return {
+                "simulated": True,
+                "mode": "paper",
+                "pair": pair.upper(),
+                "side": side.upper(),
+                "quantity": str(amount),
+                "price": str(price),
+                "post_only": post_only,
+            }
         req = {
             "side": side.upper(),
             "quantity": str(amount),

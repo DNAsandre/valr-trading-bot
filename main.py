@@ -1,7 +1,24 @@
 import asyncio
 import logging
-from config import VALR_PAIR, POLL_INTERVAL, DOUBLE_ZAR_SCAN_INTERVAL, TELEGRAM_ALLOWED_USERS
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+from config import (
+    VALR_PAIR,
+    POLL_INTERVAL,
+    DOUBLE_ZAR_SCAN_INTERVAL,
+    TELEGRAM_ALLOWED_USERS,
+    MAX_DAILY_LOSS_ZAR,
+    TRADE_COOLDOWN_SECONDS,
+    MAX_TRADES_PER_DAY,
+    PAPER_FEE_PCT,
+    DAILY_REPORT_HOUR_SAST,
+    PAPER_STATE_PATH,
+)
 from exchange import ExchangeInterface
+from paper import PaperPortfolio
+from reporting import format_paper_daily_report
+from risk import TradingRiskGuard
 from strategy import Strategy
 from telegram_bot import TelegramNotifier
 
@@ -16,9 +33,24 @@ class HitlTradingBot:
             exchange=self.exchange,
             strategy=self.strategy
         )
+        self.risk_guard = TradingRiskGuard(
+            max_daily_loss_zar=MAX_DAILY_LOSS_ZAR,
+            cooldown_seconds=TRADE_COOLDOWN_SECONDS,
+            max_trades_per_day=MAX_TRADES_PER_DAY,
+        )
+        self.paper_portfolio: PaperPortfolio | None = None
+        self.paper_state_path = Path(PAPER_STATE_PATH)
         self.queue = asyncio.Queue()
 
     async def execute_signal_autonomously(self, trade_info: dict) -> tuple[bool, float]:
+        now = datetime.now(ZoneInfo("Africa/Johannesburg"))
+        decision = self.risk_guard.can_execute(now)
+        if not decision.allowed:
+            logger.warning(
+                "Blocked autonomous %s signal for %s: %s",
+                trade_info.get("signal"), trade_info.get("pair", VALR_PAIR), decision.reason,
+            )
+            return False, 0.0
         try:
             logger.info(f"Executing trade: {trade_info}")
             pair = trade_info.get('pair', VALR_PAIR)
@@ -29,6 +61,28 @@ class HitlTradingBot:
             quote_currency = 'ZAR' if 'ZAR' in pair else ('USDC' if 'USDC' in pair else 'USDT')
 
             balances = await self.exchange.get_valr_balances()
+            paper_mode = self.exchange.execution_mode == "paper"
+            if paper_mode and self.paper_portfolio is None:
+                state_path = getattr(self, "paper_state_path", None)
+                if state_path and Path(state_path).exists():
+                    self.paper_portfolio = PaperPortfolio.load(state_path)
+                    logger.info("Loaded persisted paper XRP/ZAR portfolio state.")
+                else:
+                    seed_zar = next(
+                        (float(bal.get("available", 0)) for bal in balances if bal.get("currency") == "ZAR"),
+                        0.0,
+                    )
+                    seed_xrp = next(
+                        (float(bal.get("available", 0)) for bal in balances if bal.get("currency") == "XRP"),
+                        0.0,
+                    )
+                    self.paper_portfolio = PaperPortfolio(
+                        initial_zar=seed_zar,
+                        initial_xrp=seed_xrp,
+                        initial_xrp_price=price,
+                        fee_pct=PAPER_FEE_PCT,
+                    )
+                    logger.info("Seeded paper XRP/ZAR portfolio from a read-only VALR balance snapshot.")
             amount = 0.0
 
             if signal == 'BUY':
@@ -39,11 +93,13 @@ class HitlTradingBot:
                         quote_balance = float(bal.get('available', 0))
                     elif bal.get('currency') == base_currency:
                         base_held = float(bal.get('available', 0))
-                        total_base = float(bal.get('total', 0))
-                        
-                # PREVENT OVERTRADING: Do not buy if we already have a meaningful position
-                # Assuming "meaningful" means we hold more than $5/R100 worth (a basic threshold)
-                current_value_held = total_base * price if 'total_base' in locals() else base_held * price
+
+                if paper_mode:
+                    quote_balance = self.paper_portfolio.zar_balance
+                    base_held = self.paper_portfolio.xrp_balance
+
+                # Do not stack a second XRP position.
+                current_value_held = base_held * price
                 if current_value_held > 100:
                     logger.info(f"Ignored BUY signal for {pair}: Already hold R{current_value_held:.2f} worth.")
                     return False, 0.0
@@ -61,8 +117,10 @@ class HitlTradingBot:
                     if bal.get('currency') == base_currency:
                         base_balance = float(bal.get('available', 0))
                         break
+                if paper_mode:
+                    base_balance = self.paper_portfolio.xrp_balance
 
-                # SELL 100%: Ignore risk_pct on sells. Lock in the full profit.
+                # Exit the single simulated/live XRP position.
                 amount = base_balance
                 if amount <= 0:
                     logger.error(f"Insufficient {base_currency} balance.")
@@ -79,6 +137,23 @@ class HitlTradingBot:
                 price=price
             )
             logger.info(f"Order result: {result}")
+            realized_pnl_zar = 0.0
+            if paper_mode:
+                if signal == "BUY":
+                    paper_fill = self.paper_portfolio.buy(quantity=amount, price=price)
+                else:
+                    paper_fill = self.paper_portfolio.sell(quantity=amount, price=price)
+                realized_pnl_zar = paper_fill.realized_pnl_zar
+                logger.info(
+                    "Paper portfolio updated: realized P&L R%.2f, ZAR R%.2f, XRP %.8f",
+                    realized_pnl_zar,
+                    self.paper_portfolio.zar_balance,
+                    self.paper_portfolio.xrp_balance,
+                )
+                state_path = getattr(self, "paper_state_path", None)
+                if state_path:
+                    self.paper_portfolio.save(state_path)
+            self.risk_guard.record_execution(now, realized_pnl_zar=realized_pnl_zar)
             return True, amount
 
         except Exception as e:
@@ -98,7 +173,9 @@ class HitlTradingBot:
                 if pair not in self.notifier.watched_pairs:
                     continue
 
-                self.strategy.add_price(pair, price)
+                candle_closed = self.strategy.add_price(pair, price)
+                if not candle_closed:
+                    continue
 
                 valr_ob = await self.exchange.get_valr_order_book(pair)
                 luno_ob = {}  # Luno only has BTC pair
@@ -258,6 +335,31 @@ class HitlTradingBot:
                 logger.warning(f"Double ZAR loop error: {e}")
                 await asyncio.sleep(30)
 
+    async def paper_daily_report_loop(self):
+        """Send one marked-to-market paper report per SAST day after the configured hour."""
+        logger.info("Paper daily report loop started.")
+        reported_date = None
+        while True:
+            try:
+                now = datetime.now(ZoneInfo("Africa/Johannesburg"))
+                if (
+                    self.exchange.execution_mode == "paper"
+                    and self.paper_portfolio is not None
+                    and now.hour >= DAILY_REPORT_HOUR_SAST
+                    and reported_date != now.date()
+                ):
+                    summary = await self.exchange.get_valr_market_summary(VALR_PAIR)
+                    mark_price = float((summary or {}).get("bidPrice") or (summary or {}).get("lastTradedPrice") or 0)
+                    if mark_price > 0:
+                        report = self.paper_portfolio.daily_report(mark_price=mark_price)
+                        await self.notifier.notify_paper_report(format_paper_daily_report(report))
+                        reported_date = now.date()
+                    else:
+                        logger.warning("Skipping paper report: no XRP/ZAR mark price available.")
+            except Exception as e:
+                logger.warning("Paper daily report loop error: %s", e)
+            await asyncio.sleep(60)
+
     async def rest_poller(self):
         """Polls VALR REST API for prices of watched pairs that aren't covered by WebSocket."""
         logger.info("REST price poller started.")
@@ -266,22 +368,22 @@ class HitlTradingBot:
                 for pair in list(self.notifier.watched_pairs):
                     try:
                         summary = await self.exchange.get_valr_market_summary(pair)
-                        if summary:
-                            last_price = float(summary.get('lastTradedPrice', 0))
-                            if last_price > 0:
-                                self.strategy.add_price(pair, last_price)
+                        if not summary:
+                            continue
+                        last_price = float(summary.get('lastTradedPrice', 0))
+                        if last_price <= 0:
+                            continue
+                        candle_closed = self.strategy.add_price(pair, last_price)
+                        if not candle_closed:
+                            continue
 
-                                # Run analysis
-                                valr_ob = await self.exchange.get_valr_order_book(pair)
-                                signal = self.strategy.analyze(pair, valr_ob, {})
-                                if signal:
-                                    logger.info(f"REST Autonomous Signal for {pair}: {signal['insight']}")
-                                    
-                                    # Execute without HITL
-                                    success, amount = await self.execute_signal_autonomously(signal)
-                                    
-                                    # Notify Telegram
-                                    await self.notifier.notify_execution(signal, success, amount)
+                        # Run analysis only for a completed candle.
+                        valr_ob = await self.exchange.get_valr_order_book(pair)
+                        signal = self.strategy.analyze(pair, valr_ob, {})
+                        if signal:
+                            logger.info(f"REST Autonomous Signal for {pair}: {signal['insight']}")
+                            success, amount = await self.execute_signal_autonomously(signal)
+                            await self.notifier.notify_execution(signal, success, amount)
                     except Exception as e:
                         logger.warning(f"REST poll error for {pair}: {e}")
 
@@ -304,10 +406,9 @@ class HitlTradingBot:
             consumer_task = asyncio.create_task(self.strategy_consumer())
             producer_task = asyncio.create_task(self.ws_producer())
             poller_task = asyncio.create_task(self.rest_poller())
-            ai_scanner_task = asyncio.create_task(self.ai_market_scan_loop())
-            double_zar_task = asyncio.create_task(self.double_zar_loop())
+            paper_report_task = asyncio.create_task(self.paper_daily_report_loop())
 
-            await asyncio.gather(consumer_task, producer_task, poller_task, ai_scanner_task, double_zar_task)
+            await asyncio.gather(consumer_task, producer_task, poller_task, paper_report_task)
 
         except KeyboardInterrupt:
             logger.info("Shutting down...")

@@ -758,6 +758,14 @@ class TelegramNotifier:
 
         await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
 
+    async def notify_paper_report(self, text: str) -> None:
+        """Send a non-execution, clearly labelled paper-performance report."""
+        for user_id in TELEGRAM_ALLOWED_USERS:
+            try:
+                await self.app.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+            except Exception as e:
+                logger.error("Failed sending paper report to Telegram recipient: %s", e)
+
     async def notify_execution(self, trade_info: dict, success: bool, amount: float):
         """Notify user of an autonomous trade execution."""
         display_pair = trade_info.get('display_pair', trade_info.get('pair', 'BTC/ZAR'))

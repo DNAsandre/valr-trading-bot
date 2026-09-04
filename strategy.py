@@ -1,5 +1,6 @@
 import logging
 import json
+import time
 import pandas as pd
 from openai import AsyncOpenAI
 from config import TRAILING_STOP_LOSS_PCT, OPENAI_API_KEY, SUPPORTED_PAIRS
@@ -7,7 +8,9 @@ from config import TRAILING_STOP_LOSS_PCT, OPENAI_API_KEY, SUPPORTED_PAIRS
 logger = logging.getLogger(__name__)
 
 class Strategy:
-    def __init__(self):
+    def __init__(self, candle_seconds: int = 300):
+        if candle_seconds <= 0:
+            raise ValueError("candle_seconds must be positive")
         self.rsi_length = 14
         self.bb_length = 20
         self.bb_std = 2.0
@@ -15,17 +18,33 @@ class Strategy:
         self.macd_slow = 26
         self.macd_signal = 9
 
-        # Multi-pair: keyed by pair name
+        # One completed close per candle, never one indicator sample per tick.
+        self.candle_seconds = candle_seconds
         self.price_histories = {}
+        self._open_candles = {}  # pair -> {"bucket": int, "close": float}
         self.ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-    def add_price(self, pair: str, price: float):
-        """Add a price to the rolling window for a specific pair."""
+    def add_price(self, pair: str, price: float, timestamp: float | None = None) -> bool:
+        """Update an in-progress candle and return True only when one has closed."""
+        observed_at = time.time() if timestamp is None else timestamp
+        bucket = int(observed_at // self.candle_seconds)
+        open_candle = self._open_candles.get(pair)
+        if open_candle is None:
+            self._open_candles[pair] = {"bucket": bucket, "close": float(price)}
+            return False
+        if bucket < open_candle["bucket"]:
+            return False
+        if bucket == open_candle["bucket"]:
+            open_candle["close"] = float(price)
+            return False
+
         if pair not in self.price_histories:
             self.price_histories[pair] = []
-        self.price_histories[pair].append(price)
+        self.price_histories[pair].append(open_candle["close"])
         if len(self.price_histories[pair]) > 150:
             self.price_histories[pair].pop(0)
+        self._open_candles[pair] = {"bucket": bucket, "close": float(price)}
+        return True
 
     def get_status(self, pair: str) -> dict | None:
         """Return current indicator readings for a pair without triggering signals."""
