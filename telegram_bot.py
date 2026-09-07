@@ -771,13 +771,30 @@ class TelegramNotifier:
         display_pair = trade_info.get('display_pair', trade_info.get('pair', 'BTC/ZAR'))
         
         if success:
+            mode = getattr(self.exchange, "execution_mode", "live")
+            execution_title = "PAPER TRADE EXECUTED" if mode == "paper" else "LIVE TRADE EXECUTED"
             message = (
-                f"🚨 *TRADE EXECUTED* 🚨\n\n"
+                f"🚨 *{execution_title}* 🚨\n\n"
                 f"*Action*: {trade_info['signal']} {amount:,.8f} {display_pair}\n"
                 f"*Price*: R {trade_info['price']:.2f}\n"
                 f"*Take-Profit*: R {trade_info['take_profit']:.2f}\n"
                 f"*Stop-Loss*: R {trade_info['stop_loss']:.2f}\n\n"
                 f"🧠 _{trade_info['insight']}_"
+            )
+        elif trade_info.get("execution_status") == "skipped":
+            reason_key = str(trade_info.get("execution_reason") or "")
+            reason_text = {
+                "position_already_open": "XRP position already open",
+                "daily_loss_limit": "Daily loss limit reached",
+                "daily_trade_limit": "Daily trade limit reached",
+                "trade_cooldown": "Trade cooldown active",
+            }.get(reason_key, "Risk control blocked this signal")
+            message = (
+                f"ℹ️ *SIGNAL SKIPPED*\n\n"
+                f"*Action*: {trade_info['signal']} {display_pair}\n"
+                f"*Price*: R {trade_info['price']:.2f}\n"
+                f"*Reason*: {reason_text}\n\n"
+                f"No order was submitted."
             )
         else:
             message = (
@@ -786,7 +803,7 @@ class TelegramNotifier:
                 f"Price: R {trade_info['price']:.2f}\n\n"
                 f"Bot attempted to trade based on:\n"
                 f"_{trade_info['insight']}_\n\n"
-                f"Check bot logs for reasons (e.g., insufficient funds)."
+                f"Check bot logs for the execution error."
             )
 
         for user_id in TELEGRAM_ALLOWED_USERS:

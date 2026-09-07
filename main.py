@@ -46,6 +46,8 @@ class HitlTradingBot:
         now = datetime.now(ZoneInfo("Africa/Johannesburg"))
         decision = self.risk_guard.can_execute(now)
         if not decision.allowed:
+            trade_info["execution_status"] = "skipped"
+            trade_info["execution_reason"] = decision.reason or "risk_control"
             logger.warning(
                 "Blocked autonomous %s signal for %s: %s",
                 trade_info.get("signal"), trade_info.get("pair", VALR_PAIR), decision.reason,
@@ -100,6 +102,8 @@ class HitlTradingBot:
 
                 # One-position rule: do not stack a second XRP entry.
                 if base_held > 0:
+                    trade_info["execution_status"] = "skipped"
+                    trade_info["execution_reason"] = "position_already_open"
                     logger.info(
                         "Ignored BUY signal for %s: XRP position already open (%.8f XRP).",
                         pair,

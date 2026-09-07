@@ -14,6 +14,7 @@ from strategy import Strategy
 from paper import PaperPortfolio
 from reporting import format_paper_daily_report
 from backtest import run_backtest
+from telegram_bot import TelegramNotifier
 
 
 class PaperExecutionTests(unittest.TestCase):
@@ -58,6 +59,8 @@ class PaperExecutionTests(unittest.TestCase):
             success, amount = await bot.execute_signal_autonomously(signal)
             self.assertFalse(success)
             self.assertEqual(amount, 0.0)
+            self.assertEqual(signal["execution_status"], "skipped")
+            self.assertEqual(signal["execution_reason"], "daily_loss_limit")
             bot.exchange.get_valr_balances.assert_not_awaited()
 
         asyncio.run(execute_blocked_signal())
@@ -105,9 +108,56 @@ class PaperExecutionTests(unittest.TestCase):
             success, amount = await bot.execute_signal_autonomously(signal)
             self.assertFalse(success)
             self.assertEqual(amount, 0.0)
+            self.assertEqual(signal["execution_status"], "skipped")
+            self.assertEqual(signal["execution_reason"], "position_already_open")
             bot.exchange.place_valr_order.assert_not_awaited()
 
         asyncio.run(execute_second_buy())
+
+    def test_position_skip_notification_is_not_reported_as_trade_failure(self):
+        notifier = TelegramNotifier.__new__(TelegramNotifier)
+        notifier.app = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        trade_info = {
+            "pair": "XRPZAR",
+            "display_pair": "XRP/ZAR",
+            "signal": "BUY",
+            "price": 22.85,
+            "insight": "Test signal",
+            "execution_status": "skipped",
+            "execution_reason": "position_already_open",
+        }
+
+        async def notify_skip():
+            with patch("telegram_bot.TELEGRAM_ALLOWED_USERS", [123]):
+                await notifier.notify_execution(trade_info, False, 0.0)
+            message = notifier.app.bot.send_message.await_args.kwargs["text"]
+            self.assertIn("SIGNAL SKIPPED", message)
+            self.assertIn("XRP position already open", message)
+            self.assertNotIn("TRADE FAILED", message)
+
+        asyncio.run(notify_skip())
+
+    def test_successful_paper_notification_is_explicitly_labeled_paper(self):
+        notifier = TelegramNotifier.__new__(TelegramNotifier)
+        notifier.exchange = SimpleNamespace(execution_mode="paper")
+        notifier.app = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        trade_info = {
+            "pair": "XRPZAR",
+            "display_pair": "XRP/ZAR",
+            "signal": "BUY",
+            "price": 22.85,
+            "take_profit": 23.19,
+            "stop_loss": 22.62,
+            "insight": "Test signal",
+        }
+
+        async def notify_paper_fill():
+            with patch("telegram_bot.TELEGRAM_ALLOWED_USERS", [123]):
+                await notifier.notify_execution(trade_info, True, 2.5)
+            message = notifier.app.bot.send_message.await_args.kwargs["text"]
+            self.assertIn("PAPER TRADE EXECUTED", message)
+
+        asyncio.run(notify_paper_fill())
 
     def test_ticks_only_create_one_indicator_point_per_closed_candle(self):
         strategy = Strategy(candle_seconds=300)
