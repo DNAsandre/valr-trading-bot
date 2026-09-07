@@ -29,6 +29,21 @@ class XrpZarOnlyTests(unittest.TestCase):
 
         asyncio.run(place_blocked_order())
 
+    def test_live_orders_require_autonomous_xrpzar_source(self):
+        exchange = ExchangeInterface(execution_mode="live")
+
+        def order_must_not_be_called(**kwargs):
+            raise AssertionError("Manual or Telegram order must not reach VALR in live mode")
+
+        async def place_manual_live_order():
+            with patch.object(exchange.valr_client, "post_limit_order", order_must_not_be_called):
+                with self.assertRaisesRegex(PermissionError, "autonomous"):
+                    await exchange.place_valr_order(
+                        pair="XRPZAR", side="BUY", amount=1.0, price=20.0
+                    )
+
+        asyncio.run(place_manual_live_order())
+
     def test_websocket_subscribes_to_xrp_zar_trades_only(self):
         class FakeWebSocketClient:
             init_kwargs: dict[str, Any] = {}

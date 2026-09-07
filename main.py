@@ -141,7 +141,8 @@ class HitlTradingBot:
                 pair=pair,
                 side=signal,
                 amount=amount,
-                price=price
+                price=price,
+                execution_source="autonomous_xrpzar",
             )
             logger.info(f"Order result: {result}")
             realized_pnl_zar = 0.0

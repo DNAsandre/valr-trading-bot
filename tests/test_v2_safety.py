@@ -87,6 +87,10 @@ class PaperExecutionTests(unittest.TestCase):
             self.assertIsInstance(bot.paper_portfolio, PaperPortfolio)
             self.assertAlmostEqual(bot.paper_portfolio.zar_balance, 979.96, places=2)
             bot.exchange.place_valr_order.assert_awaited_once()
+            self.assertEqual(
+                bot.exchange.place_valr_order.await_args.kwargs["execution_source"],
+                "autonomous_xrpzar",
+            )
 
         asyncio.run(execute_paper_signal())
 

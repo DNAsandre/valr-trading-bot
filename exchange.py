@@ -255,11 +255,24 @@ class ExchangeInterface:
             logger.error(f"Failed to calculate profit analysis: {e}")
             return None
 
-    async def place_valr_order(self, pair: str, side: str, amount: float, price: float, post_only: bool = True):
+    async def place_valr_order(
+        self,
+        pair: str,
+        side: str,
+        amount: float,
+        price: float,
+        post_only: bool = True,
+        execution_source: str | None = None,
+    ):
         """Place a limit order or record a paper fill, always restricted to XRP/ZAR."""
-        if pair.upper() != VALR_PAIR:
+        pair = pair.upper()
+        if pair != VALR_PAIR:
             raise ValueError(
-                f"Trading is locked to {VALR_PAIR}; refusing order for {pair.upper()}."
+                f"Trading is locked to {VALR_PAIR}; refusing order for {pair}."
+            )
+        if self.execution_mode == "live" and execution_source != "autonomous_xrpzar":
+            raise PermissionError(
+                "Live orders require the approved autonomous XRP/ZAR execution source."
             )
         if self.execution_mode == "paper":
             logger.info(
