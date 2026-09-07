@@ -547,15 +547,18 @@ class TelegramNotifier:
         if not context.args:
             await update.message.reply_text(
                 f"⚖️ *Current Trade Size*: {self.risk_pct * 100:.1f}%\n\n"
-                "Use `/risk 10` to set position size to 10% of available balance per trade.",
+                f"Maximum permitted position size: {MAX_POSITION_SIZE_PCT * 100:.1f}%.",
                 parse_mode='Markdown'
             )
             return
 
         try:
             new_risk = float(context.args[0])
-            if new_risk <= 0 or new_risk > 100:
-                await update.message.reply_text("❌ Percentage must be between 0.1 and 100.")
+            max_risk_pct = MAX_POSITION_SIZE_PCT * 100
+            if new_risk <= 0 or new_risk > max_risk_pct:
+                await update.message.reply_text(
+                    f"❌ Percentage must be above 0 and no more than the safety maximum of {max_risk_pct:.1f}%."
+                )
                 return
                 
             self.risk_pct = new_risk / 100.0

@@ -159,6 +159,25 @@ class PaperExecutionTests(unittest.TestCase):
 
         asyncio.run(notify_paper_fill())
 
+    def test_telegram_cannot_raise_position_size_above_two_percent(self):
+        notifier = TelegramNotifier.__new__(TelegramNotifier)
+        notifier.risk_pct = 0.02
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=123),
+            message=SimpleNamespace(reply_text=AsyncMock()),
+        )
+        context = SimpleNamespace(args=["10"])
+
+        async def attempt_risk_increase():
+            with patch("telegram_bot.TELEGRAM_ALLOWED_USERS", [123]):
+                await notifier.risk_cmd(update, context)
+            self.assertEqual(notifier.risk_pct, 0.02)
+            message = update.message.reply_text.await_args.args[0]
+            self.assertIn("maximum", message.lower())
+            self.assertIn("2.0%", message)
+
+        asyncio.run(attempt_risk_increase())
+
     def test_ticks_only_create_one_indicator_point_per_closed_candle(self):
         strategy = Strategy(candle_seconds=300)
         strategy.add_price("XRPZAR", 23.00, timestamp=0)
