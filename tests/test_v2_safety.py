@@ -118,7 +118,7 @@ class PaperExecutionTests(unittest.TestCase):
 
         asyncio.run(execute_second_buy())
 
-    def test_position_skip_notification_is_not_reported_as_trade_failure(self):
+    def test_position_skip_notification_does_not_send_telegram_message(self):
         notifier = TelegramNotifier.__new__(TelegramNotifier)
         notifier.app = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
         trade_info = {
@@ -134,10 +134,7 @@ class PaperExecutionTests(unittest.TestCase):
         async def notify_skip():
             with patch("telegram_bot.TELEGRAM_ALLOWED_USERS", [123]):
                 await notifier.notify_execution(trade_info, False, 0.0)
-            message = notifier.app.bot.send_message.await_args.kwargs["text"]
-            self.assertIn("SIGNAL SKIPPED", message)
-            self.assertIn("XRP position already open", message)
-            self.assertNotIn("TRADE FAILED", message)
+            notifier.app.bot.send_message.assert_not_awaited()
 
         asyncio.run(notify_skip())
 

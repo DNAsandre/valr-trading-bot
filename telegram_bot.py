@@ -785,20 +785,13 @@ class TelegramNotifier:
                 f"🧠 _{trade_info['insight']}_"
             )
         elif trade_info.get("execution_status") == "skipped":
-            reason_key = str(trade_info.get("execution_reason") or "")
-            reason_text = {
-                "position_already_open": "XRP position already open",
-                "daily_loss_limit": "Daily loss limit reached",
-                "daily_trade_limit": "Daily trade limit reached",
-                "trade_cooldown": "Trade cooldown active",
-            }.get(reason_key, "Risk control blocked this signal")
-            message = (
-                f"ℹ️ *SIGNAL SKIPPED*\n\n"
-                f"*Action*: {trade_info['signal']} {display_pair}\n"
-                f"*Price*: R {trade_info['price']:.2f}\n"
-                f"*Reason*: {reason_text}\n\n"
-                f"No order was submitted."
+            logger.info(
+                "Suppressing Telegram notification for skipped %s signal on %s: %s.",
+                trade_info.get("signal"),
+                display_pair,
+                trade_info.get("execution_reason"),
             )
+            return
         else:
             message = (
                 f"⚠️ *TRADE FAILED TO EXECUTE* ⚠️\n\n"
