@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from decimal import Decimal, InvalidOperation
 from typing import Optional, Dict
 
 from valr_python import Client, WebSocketClient
@@ -42,6 +43,24 @@ class ExchangeInterface:
     async def get_valr_balances(self):
         """Fetch all VALR balances via REST."""
         return await self._run_valr_sync(self.valr_client.get_balances)
+
+    async def get_valr_open_orders(self):
+        """Read current VALR open orders for fail-closed live reconciliation."""
+        return await self._run_valr_sync(self.valr_client.get_all_open_orders)
+
+    async def get_valr_order_status(self, pair: str, order_id: str):
+        """Read a single XRP/ZAR order status; never submit or modify it."""
+        if pair.upper() != VALR_PAIR:
+            raise ValueError(f"Order reconciliation is locked to {VALR_PAIR}.")
+        if not isinstance(order_id, str) or not order_id.strip():
+            raise ValueError("A non-empty VALR order ID is required.")
+        return await self._run_valr_sync(
+            self.valr_client.get_order_status, VALR_PAIR, order_id=order_id
+        )
+
+    async def get_xrp_zar_trade_history(self):
+        """Read XRP/ZAR trade fills used to reconcile tracked bot orders."""
+        return await self._run_valr_sync(self.valr_client.get_trade_history, VALR_PAIR)
 
     async def get_valr_market_summary(self, pair: str):
         """Fetch current market summary (last price, bid, ask) for a specific pair."""
@@ -266,6 +285,21 @@ class ExchangeInterface:
     ):
         """Place a limit order or record a paper fill, always restricted to XRP/ZAR."""
         pair = pair.upper()
+        normalized_side = str(side).upper()
+        try:
+            normalized_amount = Decimal(str(amount))
+            normalized_price = Decimal(str(price))
+        except (InvalidOperation, TypeError, ValueError) as error:
+            raise ValueError("Order amount and price must be finite positive values.") from error
+        if normalized_side not in {"BUY", "SELL"}:
+            raise ValueError("Order side must be BUY or SELL.")
+        if (
+            not normalized_amount.is_finite()
+            or not normalized_price.is_finite()
+            or normalized_amount <= 0
+            or normalized_price <= 0
+        ):
+            raise ValueError("Order amount and price must be finite positive values.")
         if pair != VALR_PAIR:
             raise ValueError(
                 f"Trading is locked to {VALR_PAIR}; refusing order for {pair}."
@@ -276,21 +310,21 @@ class ExchangeInterface:
             )
         if self.execution_mode == "paper":
             logger.info(
-                "Paper order recorded: %s %s %s at R%s", side.upper(), amount, pair.upper(), price
+                "Paper order recorded: %s %s %s at R%s", normalized_side, normalized_amount, pair, normalized_price
             )
             return {
                 "simulated": True,
                 "mode": "paper",
-                "pair": pair.upper(),
-                "side": side.upper(),
-                "quantity": str(amount),
-                "price": str(price),
+                "pair": pair,
+                "side": normalized_side,
+                "quantity": str(normalized_amount),
+                "price": str(normalized_price),
                 "post_only": post_only,
             }
         req = {
-            "side": side.upper(),
-            "quantity": str(amount),
-            "price": str(price),
+            "side": normalized_side,
+            "quantity": str(normalized_amount),
+            "price": str(normalized_price),
             "pair": pair,
             "post_only": post_only
         }
