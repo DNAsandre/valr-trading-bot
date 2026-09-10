@@ -42,6 +42,10 @@ PAPER_STATE_PATH = os.getenv(
     "PAPER_STATE_PATH",
     "/Users/Shared/Hermes Agent Workspace/valr-trading-bot-paper-state.json",
 )
+LIVE_STATE_PATH = os.getenv(
+    "LIVE_STATE_PATH",
+    "/Users/Shared/Hermes Agent Workspace/valr-trading-bot-live-state.json",
+)
 
 # Trading Pairs
 # This bot is intentionally locked to XRP/ZAR.  Keep execution and the

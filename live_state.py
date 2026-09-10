@@ -134,19 +134,26 @@ class LiveState:
             raise LiveStateError("invalid VALR order side")
 
     def accept_order(self, order: Mapping[str, object]) -> None:
-        """Attach the VALR order ID to the one previously reserved order."""
+        """Attach the VALR ID returned after submission to the reserved order.
+
+        VALR's create-order response is normally ``{"id": ...}``; a complete
+        order-status payload is also accepted when supplied by a caller.
+        """
         if self.pending_order is None:
             raise LiveStateError("no pending order to accept")
         if self.pending_order["order_id"] is not None:
             raise LiveStateError("pending order already accepted")
-        self._validate_order_shape(order)
-        if str(order["side"]).upper() != self.pending_order["side"]:
-            raise LiveStateError("unexpected VALR order")
-        if self._decimal(order["originalQuantity"], "original quantity", positive=True) != self.pending_order["requested_quantity"]:
-            raise LiveStateError("unexpected VALR order quantity")
-        if self._decimal(order["price"], "order price", positive=True) != self.pending_order["price"]:
-            raise LiveStateError("unexpected VALR order price")
-        order_id = str(order["orderId"])
+        if "id" in order:
+            order_id = str(order["id"])
+        else:
+            self._validate_order_shape(order)
+            if str(order["side"]).upper() != self.pending_order["side"]:
+                raise LiveStateError("unexpected VALR order")
+            if self._decimal(order["originalQuantity"], "original quantity", positive=True) != self.pending_order["requested_quantity"]:
+                raise LiveStateError("unexpected VALR order quantity")
+            if self._decimal(order["price"], "order price", positive=True) != self.pending_order["price"]:
+                raise LiveStateError("unexpected VALR order price")
+            order_id = str(order["orderId"])
         if not order_id:
             raise LiveStateError("invalid order ID")
         self.pending_order["order_id"] = order_id

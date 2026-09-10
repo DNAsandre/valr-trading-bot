@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from config import (
@@ -14,9 +15,12 @@ from config import (
     PAPER_FEE_PCT,
     DAILY_REPORT_HOUR_SAST,
     PAPER_STATE_PATH,
+    LIVE_STATE_PATH,
+    TRAILING_STOP_LOSS_PCT,
 )
 from exchange import ExchangeInterface
 from paper import PaperPortfolio
+from live_state import LiveState, LiveStateError
 from reporting import format_paper_daily_report
 from risk import TradingRiskGuard
 from strategy import Strategy
@@ -40,7 +44,168 @@ class HitlTradingBot:
         )
         self.paper_portfolio: PaperPortfolio | None = None
         self.paper_state_path = Path(PAPER_STATE_PATH)
+        # Live execution loads only a durable bot-owned ledger. It is never
+        # seeded from exchange balances.
+        self.live_state: LiveState | None = None
+        self.live_state_path = Path(LIVE_STATE_PATH)
+        self.live_execution_blocked = False
         self.queue = asyncio.Queue()
+
+    async def initialize_live_execution(self) -> bool:
+        """Load and reconcile durable live state before starting any strategy loop."""
+        if getattr(self.exchange, "execution_mode", "paper") != "live":
+            return True
+        try:
+            state_path = Path(self.live_state_path)
+            self.live_state = LiveState.load(state_path)
+            open_orders = await self.exchange.get_valr_open_orders()
+            xrp_orders = [
+                order for order in open_orders
+                if str(order.get("currencyPair", "")).upper() == VALR_PAIR
+            ]
+            tracked_id = (
+                self.live_state.pending_order.get("order_id")
+                if self.live_state.pending_order is not None
+                else None
+            )
+            if any(str(order.get("orderId", "")) != tracked_id for order in xrp_orders):
+                raise LiveStateError("untracked XRP/ZAR open order")
+            self.live_execution_blocked = False
+            if self.live_state.pending_order is not None:
+                if not tracked_id:
+                    raise LiveStateError("pending submission has no VALR order ID")
+                if not await self.reconcile_live_order():
+                    raise LiveStateError("pending order reconciliation failed")
+            logger.info(
+                "Live state ready: %.8f bot-owned XRP; %d daily reconciled fill(s).",
+                float(self.live_state.settled_xrp),
+                self.live_state.daily_execution_count,
+            )
+            return True
+        except Exception as error:
+            self.live_state = None
+            self.live_execution_blocked = True
+            logger.error("Live startup failed closed: %s", error, exc_info=True)
+            return False
+
+    def live_protective_exit_signal(self, pair: str, price: float) -> dict | None:
+        """Create a real XRP/ZAR stop/target exit from settled bot-owned lots only."""
+        if (
+            getattr(self.exchange, "execution_mode", "paper") != "live"
+            or getattr(self, "live_execution_blocked", False)
+            or pair != VALR_PAIR
+            or price <= 0
+        ):
+            return None
+        state = getattr(self, "live_state", None)
+        if state is None or state.pending_order is not None or state.settled_xrp <= 0:
+            return None
+        cost = sum((lot["cost_zar"] for lot in state.lots), Decimal("0"))
+        average_entry = cost / state.settled_xrp
+        stop = average_entry * (Decimal("1") - Decimal(str(TRAILING_STOP_LOSS_PCT)))
+        target = average_entry * (Decimal("1") + Decimal(str(TRAILING_STOP_LOSS_PCT * 1.5)))
+        current = Decimal(str(price))
+        if current > stop and current < target:
+            return None
+        reason = "stop-loss" if current <= stop else "take-profit"
+        return {
+            "signal": "SELL",
+            "pair": VALR_PAIR,
+            "display_pair": "XRP/ZAR",
+            "price": float(current),
+            "take_profit": float(target),
+            "stop_loss": float(stop),
+            "post_only": False,
+            "insight": f"Live {reason} threshold reached from reconciled bot-owned XRP cost basis.",
+        }
+
+    async def evaluate_live_protection(self, pair: str, price: float) -> bool:
+        """Submit a triggered protective exit once, then notify it as pending/fill state."""
+        signal = self.live_protective_exit_signal(pair, price)
+        if signal is None:
+            return False
+        success, amount = await self.execute_signal_autonomously(signal)
+        await self.notifier.notify_execution(signal, success, amount)
+        return True
+
+    def _live_risk_block_reason(self, now: datetime) -> str | None:
+        state = self.live_state
+        if state is None:
+            return "live_state_unavailable"
+        prior_day = state.sast_date
+        in_cooldown = state.in_cooldown(now)
+        if state.sast_date != prior_day:
+            state.save(self.live_state_path)
+        if state.daily_realized_pnl_zar <= -Decimal(str(MAX_DAILY_LOSS_ZAR)):
+            return "daily_loss_limit"
+        if state.daily_execution_count >= MAX_TRADES_PER_DAY:
+            return "daily_trade_limit"
+        if in_cooldown:
+            return "cooldown"
+        return None
+
+    def _block_live_execution(self, trade_info: dict, reason: str) -> tuple[bool, float]:
+        trade_info["execution_status"] = "skipped"
+        trade_info["execution_reason"] = reason
+        logger.warning("Blocked live autonomous order: %s", reason)
+        return False, 0.0
+
+    async def reconcile_live_order(self) -> bool:
+        """Reconcile the one bot-owned pending VALR order before any future live work."""
+        if getattr(self.exchange, "execution_mode", "paper") != "live":
+            return True
+        state = getattr(self, "live_state", None)
+        state_path = getattr(self, "live_state_path", None)
+        if state is None or state_path is None:
+            self.live_execution_blocked = True
+            logger.error("Live reconciliation blocked: durable live state is unavailable.")
+            return False
+        if getattr(self, "live_execution_blocked", False):
+            return False
+        try:
+            open_orders = await self.exchange.get_valr_open_orders()
+            xrp_open_orders = [
+                order for order in open_orders
+                if str(order.get("currencyPair", "")).upper() == VALR_PAIR
+            ]
+            pending = state.pending_order
+            if pending is None:
+                if xrp_open_orders:
+                    raise LiveStateError("untracked XRP/ZAR open order")
+                return True
+            order_id = pending.get("order_id")
+            if not isinstance(order_id, str) or not order_id:
+                raise LiveStateError("pending submission has no VALR order ID")
+            if any(str(order.get("orderId", "")) != order_id for order in xrp_open_orders):
+                raise LiveStateError("untracked XRP/ZAR open order")
+            order = await self.exchange.get_valr_order_status(VALR_PAIR, order_id)
+            history = await self.exchange.get_xrp_zar_trade_history()
+            trades = [trade for trade in history if trade.get("orderId") == order_id]
+            state.reconcile_order(order, trades)
+            if (
+                state.pending_order is None
+                and Decimal(str(order["totalFilledQuantity"])) > 0
+            ):
+                state.set_cooldown_until(
+                    datetime.now(ZoneInfo("Africa/Johannesburg"))
+                    + timedelta(seconds=TRADE_COOLDOWN_SECONDS)
+                )
+            state.save(state_path)
+            return True
+        except Exception as error:
+            self.live_execution_blocked = True
+            logger.error("Live reconciliation failed; blocking future orders: %s", error, exc_info=True)
+            return False
+
+    async def live_reconciliation_loop(self) -> None:
+        """Poll durable pending state frequently; stop the loop on a fail-closed error."""
+        if getattr(self.exchange, "execution_mode", "paper") != "live":
+            return
+        while True:
+            if not await self.reconcile_live_order():
+                logger.error("Live reconciliation loop stopped after fail-closed error.")
+                return
+            await asyncio.sleep(5)
 
     async def execute_signal_autonomously(self, trade_info: dict) -> tuple[bool, float]:
         now = datetime.now(ZoneInfo("Africa/Johannesburg"))
@@ -58,12 +223,30 @@ class HitlTradingBot:
             pair = trade_info.get('pair', VALR_PAIR)
             signal = trade_info.get('signal', 'BUY').upper()
             price = float(trade_info['price'])
+            paper_mode = self.exchange.execution_mode == "paper"
+            live_state = getattr(self, "live_state", None)
+            live_state_path = getattr(self, "live_state_path", None)
+
+            if not paper_mode:
+                if getattr(self, "live_execution_blocked", False):
+                    return self._block_live_execution(trade_info, "reconciliation_failed")
+                if live_state is None or live_state_path is None:
+                    return self._block_live_execution(trade_info, "live_state_unavailable")
+                live_risk_reason = self._live_risk_block_reason(now)
+                if live_risk_reason:
+                    return self._block_live_execution(trade_info, live_risk_reason)
+                pending = live_state.pending_order
+                if pending is not None and not pending.get("order_id"):
+                    return self._block_live_execution(trade_info, "pending_order")
+                if not await self.reconcile_live_order():
+                    return self._block_live_execution(trade_info, "reconciliation_failed")
+                if live_state.pending_order is not None:
+                    return self._block_live_execution(trade_info, "pending_order")
 
             base_currency = pair.replace('ZAR', '').replace('USDT', '').replace('USDC', '')
             quote_currency = 'ZAR' if 'ZAR' in pair else ('USDC' if 'USDC' in pair else 'USDT')
 
-            balances = await self.exchange.get_valr_balances()
-            paper_mode = self.exchange.execution_mode == "paper"
+            balances = await self.exchange.get_valr_balances() if paper_mode or signal == "BUY" else []
             if paper_mode and self.paper_portfolio is None:
                 state_path = getattr(self, "paper_state_path", None)
                 if state_path and Path(state_path).exists():
@@ -99,6 +282,8 @@ class HitlTradingBot:
                 if paper_mode:
                     quote_balance = self.paper_portfolio.zar_balance
                     base_held = self.paper_portfolio.xrp_balance
+                else:
+                    base_held = float(live_state.settled_xrp)
 
                 # One-position rule: do not stack a second XRP entry.
                 if base_held > 0:
@@ -126,6 +311,8 @@ class HitlTradingBot:
                         break
                 if paper_mode:
                     base_balance = self.paper_portfolio.xrp_balance
+                else:
+                    base_balance = float(live_state.settled_xrp)
 
                 # Exit the single simulated/live XRP position.
                 amount = base_balance
@@ -137,11 +324,16 @@ class HitlTradingBot:
 
             logger.info(f"Placing {signal} order: {amount} on {pair} at R{price}")
 
+            if not paper_mode:
+                live_state.begin_order(side=signal, requested_quantity=str(amount), price=str(price))
+                live_state.save(live_state_path)
+
             result = await self.exchange.place_valr_order(
                 pair=pair,
                 side=signal,
                 amount=amount,
                 price=price,
+                post_only=bool(trade_info.get("post_only", True)),
                 execution_source="autonomous_xrpzar",
             )
             logger.info(f"Order result: {result}")
@@ -161,8 +353,14 @@ class HitlTradingBot:
                 state_path = getattr(self, "paper_state_path", None)
                 if state_path:
                     self.paper_portfolio.save(state_path)
-            self.risk_guard.record_execution(now, realized_pnl_zar=realized_pnl_zar)
-            return True, amount
+                self.risk_guard.record_execution(now, realized_pnl_zar=realized_pnl_zar)
+                return True, amount
+
+            live_state.accept_order(result)
+            live_state.save(live_state_path)
+            trade_info["execution_status"] = "submitted"
+            trade_info["execution_reason"] = "pending_reconciliation"
+            return False, 0.0
 
         except Exception as e:
             logger.error(f"Trade execution error: {e}", exc_info=True)
@@ -176,6 +374,9 @@ class HitlTradingBot:
                 data = await self.queue.get()
                 pair = data.get("pair", VALR_PAIR)
                 price = data.get("price", 0)
+
+                if await self.evaluate_live_protection(pair, price):
+                    continue
 
                 # Only analyze if this pair is being watched
                 if pair not in self.notifier.watched_pairs:
@@ -381,6 +582,8 @@ class HitlTradingBot:
                         last_price = float(summary.get('lastTradedPrice', 0))
                         if last_price <= 0:
                             continue
+                        if await self.evaluate_live_protection(pair, last_price):
+                            continue
                         candle_closed = self.strategy.add_price(pair, last_price)
                         if not candle_closed:
                             continue
@@ -407,6 +610,8 @@ class HitlTradingBot:
         await self.exchange.start_ws(self.queue)
 
     async def run(self):
+        if not await self.initialize_live_execution():
+            raise RuntimeError("Live execution preflight failed closed.")
         try:
             await self.notifier.start_bot()
             logger.info("Telegram bot initialized.")
@@ -415,8 +620,11 @@ class HitlTradingBot:
             producer_task = asyncio.create_task(self.ws_producer())
             poller_task = asyncio.create_task(self.rest_poller())
             paper_report_task = asyncio.create_task(self.paper_daily_report_loop())
+            tasks = [consumer_task, producer_task, poller_task, paper_report_task]
+            if self.exchange.execution_mode == "live":
+                tasks.append(asyncio.create_task(self.live_reconciliation_loop()))
 
-            await asyncio.gather(consumer_task, producer_task, poller_task, paper_report_task)
+            await asyncio.gather(*tasks)
 
         except KeyboardInterrupt:
             logger.info("Shutting down...")

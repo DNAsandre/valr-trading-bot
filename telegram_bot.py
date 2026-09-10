@@ -784,6 +784,13 @@ class TelegramNotifier:
                 f"*Stop-Loss*: R {trade_info['stop_loss']:.2f}\n\n"
                 f"🧠 _{trade_info['insight']}_"
             )
+        elif trade_info.get("execution_status") == "submitted":
+            message = (
+                "⏳ *LIVE ORDER SUBMITTED — PENDING RECONCILIATION*\n\n"
+                f"*Action*: {trade_info['signal']} {display_pair}\n"
+                f"*Limit Price*: R {trade_info['price']:.2f}\n\n"
+                "VALR acceptance is not a fill. The bot will update its position and P&L only after confirmed exchange fills."
+            )
         elif trade_info.get("execution_status") == "skipped":
             logger.info(
                 "Suppressing Telegram notification for skipped %s signal on %s: %s.",
