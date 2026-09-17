@@ -12,7 +12,7 @@ import os
 import tempfile
 from copy import deepcopy
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, localcontext
 from pathlib import Path
 from typing import Iterable, Mapping
 from zoneinfo import ZoneInfo
@@ -20,10 +20,11 @@ from zoneinfo import ZoneInfo
 
 SAST = ZoneInfo("Africa/Johannesburg")
 PAIR = "XRPZAR"
+LEDGER_DECIMAL_PRECISION = 28
 TERMINAL_STATUSES = frozenset({"FILLED", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "CLOSED", "COMPLETED"})
 _ORDER_FIELDS = frozenset({
     "orderId", "currencyPair", "side", "status", "originalQuantity", "price",
-    "totalFilledQuantity", "totalFilledValue", "remainingQuantity", "allowMargin", "type",
+    "totalFilledQuantity", "totalFilledValue", "remainingQuantity",
 })
 _TRADE_FIELDS = frozenset({
     "id", "orderId", "currencyPair", "side", "quantity", "price", "fee", "feeCurrency", "tradedAt",
@@ -78,7 +79,9 @@ class LiveState:
 
     @property
     def settled_xrp(self) -> Decimal:
-        return sum((lot["quantity"] for lot in self.lots), Decimal("0"))
+        with localcontext() as context:
+            context.prec = LEDGER_DECIMAL_PRECISION
+            return sum((lot["quantity"] for lot in self.lots), Decimal("0"))
 
     def _roll_risk_day(self, timestamp: datetime) -> None:
         date = self._sast_date(timestamp)
@@ -133,6 +136,49 @@ class LiveState:
         if str(order["side"]).upper() not in {"BUY", "SELL"}:
             raise LiveStateError("invalid VALR order side")
 
+    @classmethod
+    def _normalize_order(cls, order: Mapping[str, object], trades: list[Mapping[str, object]]) -> dict[str, object]:
+        """Map VALR's live order-status response into the durable ledger schema."""
+        normalized = dict(order)
+        if _ORDER_FIELDS.issubset(normalized):
+            return normalized
+        raw_fields = {
+            "orderId", "currencyPair", "orderSide", "orderStatusType",
+            "originalPrice", "originalQuantity", "remainingQuantity",
+        }
+        if not raw_fields.issubset(normalized):
+            raise LiveStateError("incomplete VALR order")
+        original = cls._decimal(normalized["originalQuantity"], "original quantity", positive=True)
+        remaining = cls._decimal(normalized["remainingQuantity"], "remaining quantity")
+        if remaining > original:
+            raise LiveStateError("remaining quantity exceeds original quantity")
+        pending = {"order_id": str(normalized["orderId"]), "side": str(normalized["orderSide"]).upper()}
+        filled_value = Decimal("0")
+        for trade in trades:
+            cls._validate_trade_shape(trade, pending)
+            filled_value += cls._decimal(trade["quantity"], "trade quantity", positive=True) * cls._decimal(
+                trade["price"], "trade price", positive=True
+            )
+        return {
+            "orderId": normalized["orderId"],
+            "currencyPair": normalized["currencyPair"],
+            "side": normalized["orderSide"],
+            "status": normalized["orderStatusType"],
+            "originalQuantity": normalized["originalQuantity"],
+            "price": normalized["originalPrice"],
+            "totalFilledQuantity": original - remaining,
+            "totalFilledValue": filled_value,
+            "remainingQuantity": normalized["remainingQuantity"],
+        }
+
+    @classmethod
+    def _matches_requested_quantity(cls, accepted: Decimal, requested: object) -> bool:
+        """Accept only an exact request or VALR's known four-decimal XRP truncation."""
+        requested_quantity = cls._decimal(requested, "requested quantity", positive=True)
+        return accepted == requested_quantity or accepted == requested_quantity.quantize(
+            Decimal("0.0001"), rounding=ROUND_DOWN
+        )
+
     def accept_order(self, order: Mapping[str, object]) -> None:
         """Attach the VALR ID returned after submission to the reserved order.
 
@@ -149,7 +195,10 @@ class LiveState:
             self._validate_order_shape(order)
             if str(order["side"]).upper() != self.pending_order["side"]:
                 raise LiveStateError("unexpected VALR order")
-            if self._decimal(order["originalQuantity"], "original quantity", positive=True) != self.pending_order["requested_quantity"]:
+            if not self._matches_requested_quantity(
+                self._decimal(order["originalQuantity"], "original quantity", positive=True),
+                self.pending_order["requested_quantity"],
+            ):
                 raise LiveStateError("unexpected VALR order quantity")
             if self._decimal(order["price"], "order price", positive=True) != self.pending_order["price"]:
                 raise LiveStateError("unexpected VALR order price")
@@ -219,9 +268,13 @@ class LiveState:
 
     def reconcile_order(self, order: Mapping[str, object], trades: Iterable[Mapping[str, object]]) -> None:
         """Atomically apply unseen fills; retain the prior ledger on any mismatch."""
-        candidate = deepcopy(self)
-        candidate._reconcile_order(order, trades)
-        self.__dict__.update(candidate.__dict__)
+        with localcontext() as context:
+            context.prec = LEDGER_DECIMAL_PRECISION
+            trade_records = list(trades)
+            normalized_order = self._normalize_order(order, trade_records)
+            candidate = deepcopy(self)
+            candidate._reconcile_order(normalized_order, trade_records)
+            self.__dict__.update(candidate.__dict__)
 
     def _reconcile_order(self, order: Mapping[str, object], trades: Iterable[Mapping[str, object]]) -> None:
         """Apply unseen fills exactly once; leave the order pending until terminal."""
@@ -233,7 +286,7 @@ class LiveState:
             raise LiveStateError("unexpected VALR order")
         original = self._decimal(order["originalQuantity"], "original quantity", positive=True)
         price = self._decimal(order["price"], "order price", positive=True)
-        if original != pending["requested_quantity"] or price != pending["price"]:
+        if not self._matches_requested_quantity(original, pending["requested_quantity"]) or price != pending["price"]:
             raise LiveStateError("changed pending order")
         filled_quantity = self._decimal(order["totalFilledQuantity"], "total filled quantity")
         filled_value = self._decimal(order["totalFilledValue"], "total filled value")

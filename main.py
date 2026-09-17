@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from config import (
@@ -181,10 +181,11 @@ class HitlTradingBot:
             order = await self.exchange.get_valr_order_status(VALR_PAIR, order_id)
             history = await self.exchange.get_xrp_zar_trade_history()
             trades = [trade for trade in history if trade.get("orderId") == order_id]
+            prior_execution_count = state.daily_execution_count
             state.reconcile_order(order, trades)
             if (
                 state.pending_order is None
-                and Decimal(str(order["totalFilledQuantity"])) > 0
+                and state.daily_execution_count > prior_execution_count
             ):
                 state.set_cooldown_until(
                     datetime.now(ZoneInfo("Africa/Johannesburg"))
@@ -321,6 +322,13 @@ class HitlTradingBot:
                     return False, 0.0
 
             amount = round(amount, 8)
+            if not paper_mode:
+                amount = float(
+                    Decimal(str(amount)).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+                )
+                if amount <= 0:
+                    logger.error(f"Insufficient {base_currency} quantity after VALR precision normalization.")
+                    return False, 0.0
 
             logger.info(f"Placing {signal} order: {amount} on {pair} at R{price}")
 

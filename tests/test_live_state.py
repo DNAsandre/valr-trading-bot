@@ -1,7 +1,7 @@
 import json
 import tempfile
 import unittest
-from decimal import Decimal
+from decimal import Decimal, getcontext
 from pathlib import Path
 
 from live_state import LiveState, LiveStateError
@@ -94,6 +94,50 @@ class LiveStateTests(unittest.TestCase):
         self.assertEqual(state.lots, [{"quantity": Decimal("3"), "cost_zar": Decimal("60")}])
         self.assertEqual(state.daily_realized_pnl_zar, Decimal("108"))
         self.assertIsNone(state.pending_order)
+
+    def test_reconciles_valr_filled_order_status_shape_and_accepted_quantity_precision(self):
+        state = LiveState()
+        state.begin_order(side="BUY", requested_quantity="2.63142756", price="22.32")
+        state.accept_order({"id": "valr-filled-buy"})
+        valr_status = {
+            "orderId": "valr-filled-buy",
+            "currencyPair": "XRPZAR",
+            "orderSide": "buy",
+            "orderStatusType": "Filled",
+            "orderType": "post-only limit",
+            "originalPrice": "22.32",
+            "originalQuantity": "2.6314",
+            "remainingQuantity": "0",
+        }
+        fill = self.trade(
+            order_id="valr-filled-buy",
+            side="buy",
+            quantity="2.6314",
+            price="22.32",
+            fee="0.00473652",
+            fee_currency="XRP",
+        )
+
+        state.reconcile_order(valr_status, [fill])
+
+        self.assertIsNone(state.pending_order)
+        self.assertEqual(state.settled_xrp, Decimal("2.62666348"))
+        self.assertEqual(state.daily_execution_count, 1)
+
+    def test_live_ledger_preserves_xrp_fee_precision_when_ambient_decimal_context_is_low(self):
+        state = LiveState()
+        state.begin_order(side="BUY", requested_quantity="2.6314", price="22.32")
+        state.accept_order(self.order(quantity="2.6314", price="22.32"))
+        original_precision = getcontext().prec
+        try:
+            getcontext().prec = 8
+            state.reconcile_order(
+                self.order(quantity="2.6314", price="22.32", status="Filled", filled_quantity="2.6314", filled_value="58.732848"),
+                [self.trade(quantity="2.6314", price="22.32", fee="0.00473652", fee_currency="XRP")],
+            )
+            self.assertEqual(state.settled_xrp, Decimal("2.62666348"))
+        finally:
+            getcontext().prec = original_precision
 
     def test_xrp_fees_reduce_owned_inventory_and_fifo_sell_cost(self):
         state = LiveState()
