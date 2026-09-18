@@ -28,6 +28,7 @@ from telegram_bot import TelegramNotifier
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s - %(message)s")
 logger = logging.getLogger(__name__)
+XRP_QUANTITY_INCREMENT = Decimal("0.0001")
 
 class HitlTradingBot:
     def __init__(self):
@@ -98,7 +99,11 @@ class HitlTradingBot:
         ):
             return None
         state = getattr(self, "live_state", None)
-        if state is None or state.pending_order is not None or state.settled_xrp <= 0:
+        if (
+            state is None
+            or state.pending_order is not None
+            or state.settled_xrp < XRP_QUANTITY_INCREMENT
+        ):
             return None
         cost = sum((lot["cost_zar"] for lot in state.lots), Decimal("0"))
         average_entry = cost / state.settled_xrp
@@ -324,7 +329,7 @@ class HitlTradingBot:
             amount = round(amount, 8)
             if not paper_mode:
                 amount = float(
-                    Decimal(str(amount)).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+                    Decimal(str(amount)).quantize(XRP_QUANTITY_INCREMENT, rounding=ROUND_DOWN)
                 )
                 if amount <= 0:
                     logger.error(f"Insufficient {base_currency} quantity after VALR precision normalization.")

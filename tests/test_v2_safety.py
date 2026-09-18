@@ -530,6 +530,16 @@ class LiveExecutionSafetyTests(unittest.TestCase):
         self.assertFalse(signal["post_only"])
         self.assertIn("stop-loss", signal["insight"].lower())
 
+    def test_live_protective_exit_ignores_unsellable_xrp_dust(self):
+        bot = HitlTradingBot.__new__(HitlTradingBot)
+        state = LiveState()
+        state.lots = [{"quantity": Decimal("0.00006348"), "cost_zar": Decimal("0.0014")}]
+        bot.live_state = state
+        bot.live_execution_blocked = False
+        bot.exchange = SimpleNamespace(execution_mode="live")
+
+        self.assertIsNone(bot.live_protective_exit_signal("XRPZAR", 21.54))
+
     def test_triggered_live_protection_submits_and_notifies_once(self):
         bot = HitlTradingBot.__new__(HitlTradingBot)
         signal = {"pair": "XRPZAR", "signal": "SELL", "price": 99.0}
