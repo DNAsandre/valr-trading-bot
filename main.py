@@ -291,8 +291,9 @@ class HitlTradingBot:
                 else:
                     base_held = float(live_state.settled_xrp)
 
-                # One-position rule: do not stack a second XRP entry.
-                if base_held > 0:
+                # One-position rule: live dust below VALR's tradable increment
+                # cannot be exited and must not block a fresh entry.
+                if base_held > 0 and (paper_mode or base_held >= float(XRP_QUANTITY_INCREMENT)):
                     trade_info["execution_status"] = "skipped"
                     trade_info["execution_reason"] = "position_already_open"
                     logger.info(

@@ -365,6 +365,35 @@ class LiveExecutionSafetyTests(unittest.TestCase):
         self.assertEqual(bot.exchange.place_valr_order.await_args.kwargs["amount"], 0.8510)
         self.assertEqual(state.pending_order["requested_quantity"], Decimal("0.8510"))
 
+    def test_live_xrp_dust_does_not_block_a_new_buy(self):
+        bot = HitlTradingBot.__new__(HitlTradingBot)
+        state = LiveState()
+        state.lots = [{"quantity": Decimal("0.00006348"), "cost_zar": Decimal("0.0014")}]
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "live-state.json"
+            state.save(state_path)
+            bot.exchange = SimpleNamespace(
+                execution_mode="live",
+                get_valr_balances=AsyncMock(return_value=[{"currency": "ZAR", "available": "1000"}]),
+                place_valr_order=AsyncMock(return_value={"id": "dust-buy"}),
+            )
+            bot.notifier = SimpleNamespace(risk_pct=0.02)
+            bot.risk_guard = SimpleNamespace(
+                can_execute=lambda now: SimpleNamespace(allowed=True, reason=None),
+            )
+            bot.live_state = state
+            bot.live_state_path = state_path
+            bot.live_execution_blocked = False
+            bot.reconcile_live_order = AsyncMock(return_value=True)
+
+            success, amount = asyncio.run(bot.execute_signal_autonomously(
+                {"pair": "XRPZAR", "signal": "BUY", "price": 23.5}
+            ))
+
+        self.assertFalse(success)
+        self.assertEqual(amount, 0.0)
+        bot.exchange.place_valr_order.assert_awaited_once()
+
     def test_pending_live_state_blocks_second_buy_before_valr(self):
         bot = HitlTradingBot.__new__(HitlTradingBot)
         state = LiveState()
